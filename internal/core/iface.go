@@ -25,6 +25,24 @@ type IServer interface {
 	Config() IConfig
 	// ConnManager 返回连接管理器。
 	ConnManager() IConnectionManager
+	// Process 返回当前处理管线。
+	Process() IProcess
+	// HeaderCodec 返回编解码器。
+	HeaderCodec() IHeaderCodec
+	// Send 将 header+payload 发送给指定连接，并触发处理钩子。
+	Send(ctx context.Context, connID string, hdr header.IHeader, payload []byte) error
+}
+
+// IProcess 处理管线接口：Server 在连接建立/收发/关闭时调用。
+type IProcess interface {
+	// OnListen 在连接成功加入管理器后触发，可用于初始化元数据。
+	OnListen(conn IConnection)
+	// OnReceive 在收到一帧数据后触发。
+	OnReceive(ctx context.Context, conn IConnection, hdr header.IHeader, payload []byte)
+	// OnSend 在发送一帧数据前触发，可用于审计/修改。
+	OnSend(ctx context.Context, conn IConnection, hdr header.IHeader, payload []byte) error
+	// OnClose 在连接移除/关闭后触发。
+	OnClose(conn IConnection)
 }
 
 // IHeaderCodec 头编解码接口：不同协议实现各自的头部序列化与反序列化。
@@ -67,6 +85,12 @@ type IConnection interface {
 
 	// Reader 返回与该连接绑定的读取者（如有）。
 	Reader() IReader
+	// SetReader 绑定读取器，Server 在启动读循环前调用。
+	SetReader(IReader)
+	// DispatchReceive 由 Reader 调用，用于触发接收事件。
+	DispatchReceive(header.IHeader, []byte)
+	// RawConn 返回底层 net.Conn，供 Reader 读取。
+	RawConn() net.Conn
 }
 
 // IConnectionManager 连接管理器：由 IServer 持有，用于集中管理连接。
@@ -85,6 +109,14 @@ type IConnectionManager interface {
 	Broadcast(data []byte) error
 	// CloseAll 关闭所有连接。
 	CloseAll() error
+	// SetHooks 设置连接增删时的回调（可选）。
+	SetHooks(ConnectionHooks)
+}
+
+// ConnectionHooks 连接事件钩子。
+type ConnectionHooks struct {
+	OnAdd    func(IConnection)
+	OnRemove func(IConnection)
 }
 
 // IListener 监听者接口：每种协议对应一个监听者，用于接受新连接并加入连接管理器。

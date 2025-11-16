@@ -60,7 +60,19 @@ func (c *tcpConnection) Metadata() map[string]any {
 func (c *tcpConnection) LocalAddr() net.Addr  { return c.conn.LocalAddr() }
 func (c *tcpConnection) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
 
-func (c *tcpConnection) Reader() core.IReader { return c.reader }
+func (c *tcpConnection) Reader() core.IReader     { c.mu.RLock(); defer c.mu.RUnlock(); return c.reader }
+func (c *tcpConnection) SetReader(r core.IReader) { c.mu.Lock(); c.reader = r; c.mu.Unlock() }
+
+func (c *tcpConnection) DispatchReceive(h header.IHeader, payload []byte) {
+	c.mu.RLock()
+	recv := c.recvH
+	c.mu.RUnlock()
+	if recv != nil {
+		recv(c, h, payload)
+	}
+}
+
+func (c *tcpConnection) RawConn() net.Conn { return c.conn }
 
 func (c *tcpConnection) Send(data []byte) error {
 	_, err := c.conn.Write(data)

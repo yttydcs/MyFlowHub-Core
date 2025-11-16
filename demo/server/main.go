@@ -1,166 +1,152 @@
+// filepath: d:\project\MyFlowHub-Core\demo\server\main.go
 package main
 
 import (
-	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+
+	core "MyFlowHub-Core/internal/core"
+	"MyFlowHub-Core/internal/core/config"
+	"MyFlowHub-Core/internal/core/connmgr"
+	"MyFlowHub-Core/internal/core/header"
+	"MyFlowHub-Core/internal/core/listener/tcp_listener"
+	"MyFlowHub-Core/internal/core/server"
 )
 
-// 该示例实现一个简单的 TCP 长连接服务端，包含：
-// 1) 行协议：每条消息以"\n"结尾；
-// 2) 心跳：客户端发送 "PING"，服务端回复 "PONG"；
-// 3) 超时：为读/写分别设置超时，便于检测断链；
-// 4) KeepAlive：启用 TCP KeepAlive，降低被中间设备清理的概率；
-// 5) 优雅退出：Ctrl+C 等信号触发关闭监听器与现有连接；
-// 6) 地址配置：通过环境变量 DEMO_ADDR（默认 :9000）。
+// 该示例使用 MyFlowHub-Core 框架实现一个 TCP 服务端：
+// 1) 使用 HeaderTcp 协议进行消息帧编解码；
+// 2) 支持消息回显：收到什么返回什么，payload 前缀 "ECHO: "；
+// 3) 优雅退出：Ctrl+C 等信号触发关闭；
+// 4) 地址配置：通过环境变量 DEMO_ADDR（默认 :9000）。
 func main() {
 	initLoggerFromEnv()
 
 	addr := getenv("DEMO_ADDR", ":9000")
 	slog.Info("服务端启动", "listen", addr)
 
-	ln, err := net.Listen("tcp", addr)
+	// 创建配置
+	cfg := config.NewMap(map[string]string{
+		"addr": addr,
+	})
+
+	// 创建连接管理器
+	cm := connmgr.New()
+
+	// 创建自定义 Process：收到消息后回显
+	proc := &EchoProcess{logger: slog.Default()}
+
+	// 创建 TCP 监听器
+	listener := tcp_listener.New(addr, tcp_listener.Options{
+		KeepAlive:       true,
+		KeepAlivePeriod: 30 * time.Second,
+		Logger:          slog.Default(),
+	})
+
+	// 创建 HeaderTcp 编解码器
+	codec := header.HeaderTcpCodec{}
+
+	// 创建 Server
+	srv, err := server.New(server.Options{
+		Name:     "EchoServer",
+		Logger:   slog.Default(),
+		Process:  proc,
+		Codec:    codec,
+		Listener: listener,
+		Config:   cfg,
+		Manager:  cm,
+	})
 	if err != nil {
-		slog.Error("监听失败", "err", err)
+		slog.Error("创建服务失败", "err", err)
 		os.Exit(1)
 	}
-	// 确保退出前关闭监听器（忽略错误）
-	defer func() { _ = ln.Close() }()
 
-	var (
-		mu    sync.Mutex                // 保护连接表的互斥锁
-		conns = map[net.Conn]struct{}{} // 当前活跃连接集合
-		wg    sync.WaitGroup            // 等待所有连接处理协程退出
-	)
+	// 启动服务
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// 捕获操作系统信号，用于优雅退出
+	if err := srv.Start(ctx); err != nil {
+		slog.Error("启动服务失败", "err", err)
+		os.Exit(1)
+	}
+
+	slog.Info("服务器已启动", "addr", listener.Addr())
+
+	// 等待退出信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	shutdown := make(chan struct{}) // 关闭通知
+	<-sigCh
+	slog.Info("收到退出信号，正在关闭服务器")
 
-	// 收到退出信号后：关闭监听器并主动关闭所有连接
-	go func() {
-		<-sigCh
-		slog.Info("收到退出信号，正在关闭监听器与所有连接")
-		close(shutdown)
-		_ = ln.Close()
-		mu.Lock()
-		for c := range conns {
-			_ = c.Close()
-		}
-		mu.Unlock()
-	}()
+	// 优雅停止
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopCancel()
 
-	// 主循环：接受新的客户端连接
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			// 如果是我们主动关闭导致的错误，等待所有协程退出后返回
-			select {
-			case <-shutdown:
-				wg.Wait()
-				slog.Info("服务端优雅退出完成")
-				return
-			default:
-				// 临时错误重试；其他错误直接退出
-				if ne, ok := err.(net.Error); ok && ne.Temporary() {
-					slog.Warn("Accept 临时错误", "err", ne)
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-				slog.Error("Accept 失败", "err", err)
-				os.Exit(1)
-			}
-		}
-
-		// 记录连接到集合中
-		mu.Lock()
-		conns[conn] = struct{}{}
-		mu.Unlock()
-
-		// 每个连接启动一个独立的处理协程
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
-			defer func() {
-				mu.Lock()
-				delete(conns, c)
-				mu.Unlock()
-				_ = c.Close()
-			}()
-
-			// 开启 TCP KeepAlive，周期 30 秒
-			if tcp, ok := c.(*net.TCPConn); ok {
-				_ = tcp.SetKeepAlive(true)
-				_ = tcp.SetKeepAlivePeriod(30 * time.Second)
-			}
-
-			remote := c.RemoteAddr().String()
-			slog.Info("新连接", "remote", remote)
-
-			// 发送欢迎消息
-			_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if _, err := fmt.Fprintf(c, "WELCOME %s at %s\n", remote, time.Now().Format(time.RFC3339)); err != nil {
-				slog.Warn("发送欢迎消息失败", "remote", remote, "err", err)
-				return
-			}
-
-			reader := bufio.NewReader(c)
-			for {
-				// 每次读取前设置读超时（60s），用来探测僵尸连接
-				if err := c.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
-					slog.Warn("设置读超时失败", "remote", remote, "err", err)
-					return
-				}
-				line, err := reader.ReadString('\n') // 行协议：以换行符作为消息边界
-				if err != nil {
-					if ne, ok := err.(net.Error); ok && ne.Timeout() {
-						slog.Warn("读取超时，关闭连接", "remote", remote)
-						return
-					}
-					// 常见断链场景：对端关闭/连接被重置
-					if err.Error() == "EOF" || strings.Contains(strings.ToLower(err.Error()), "closed") {
-						slog.Info("客户端关闭连接", "remote", remote)
-						return
-					}
-					slog.Error("读取失败", "remote", remote, "err", err)
-					return
-				}
-
-				msg := strings.TrimSpace(line)
-				if msg == "" {
-					continue
-				}
-				slog.Info("收到消息", "remote", remote, "msg", msg)
-
-				// 心跳与回显：PING => PONG，其它内容带时间戳回显
-				var reply string
-				switch strings.ToUpper(msg) {
-				case "PING":
-					reply = "PONG"
-				default:
-					reply = fmt.Sprintf("ECHO[%s]: %s", time.Now().Format(time.RFC3339), msg)
-				}
-
-				// 写超时（10s）避免写阻塞
-				if err := c.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-					slog.Warn("设置写超时失败", "remote", remote, "err", err)
-					return
-				}
-				if _, err := fmt.Fprintf(c, "%s\n", reply); err != nil {
-					slog.Error("写入失败", "remote", remote, "err", err)
-					return
-				}
-			}
-		}(conn)
+	if err := srv.Stop(stopCtx); err != nil {
+		slog.Error("停止服务失败", "err", err)
 	}
+	slog.Info("服务器已停止")
+}
+
+// EchoProcess 实现回显功能的处理器
+type EchoProcess struct {
+	logger *slog.Logger
+}
+
+func (p *EchoProcess) OnListen(conn core.IConnection) {
+	p.logger.Info("新连接建立", "id", conn.ID(), "remote", conn.RemoteAddr())
+}
+
+func (p *EchoProcess) OnReceive(ctx context.Context, conn core.IConnection, hdr header.IHeader, payload []byte) {
+	p.logger.Info("收到消息",
+		"conn", conn.ID(),
+		"payload_len", len(payload),
+		"payload", string(payload))
+
+	// 解析 header
+	h, ok := hdr.(header.HeaderTcp)
+	if !ok {
+		p.logger.Error("header 类型错误")
+		return
+	}
+
+	// 构造回显响应
+	respPayload := []byte(fmt.Sprintf("ECHO: %s", string(payload)))
+	respHeader := header.HeaderTcp{
+		MsgID:      h.MsgID, // 使用相同的 MsgID
+		Source:     h.Target,
+		Target:     h.Source,
+		Timestamp:  uint32(time.Now().Unix()),
+		PayloadLen: uint32(len(respPayload)),
+	}
+	respHeader.WithMajor(header.MajorOKResp).WithSubProto(h.SubProto())
+
+	// 获取 server 并发送响应
+	if srv, ok := ctx.Value("server").(core.IServer); ok && srv != nil {
+		if err := srv.Send(ctx, conn.ID(), respHeader, respPayload); err != nil {
+			p.logger.Error("发送响应失败", "err", err)
+		}
+	} else {
+		// 直接通过连接发送
+		codec := header.HeaderTcpCodec{}
+		if err := conn.SendWithHeader(respHeader, respPayload, codec); err != nil {
+			p.logger.Error("发送响应失败", "err", err)
+		}
+	}
+}
+
+func (p *EchoProcess) OnSend(_ context.Context, conn core.IConnection, _ header.IHeader, payload []byte) error {
+	p.logger.Debug("发送消息", "conn", conn.ID(), "bytes", len(payload))
+	return nil
+}
+
+func (p *EchoProcess) OnClose(conn core.IConnection) {
+	p.logger.Info("连接关闭", "id", conn.ID())
 }
 
 // getenv 读取环境变量，不存在则返回默认值
@@ -175,11 +161,11 @@ func getenv(k, def string) string {
 // 支持：LOG_LEVEL=DEBUG|INFO|WARN|ERROR（默认 INFO）
 //
 //	LOG_JSON=true|false（默认 false）
-//	LOG_CALLER=true|false（默认 true）
+//	LOG_CALLER=true|false（默认 false）
 func initLoggerFromEnv() {
 	lv := strings.TrimSpace(strings.ToUpper(getenv("LOG_LEVEL", "INFO")))
 	jsonOut := parseBool(getenv("LOG_JSON", "false"), false)
-	addSource := parseBool(getenv("LOG_CALLER", "true"), true)
+	addSource := parseBool(getenv("LOG_CALLER", "false"), false)
 
 	level := new(slog.LevelVar)
 	switch lv {
