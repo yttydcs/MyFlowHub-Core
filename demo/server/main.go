@@ -3,10 +3,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,7 +16,15 @@ import (
 	"MyFlowHub-Core/internal/core/connmgr"
 	"MyFlowHub-Core/internal/core/header"
 	"MyFlowHub-Core/internal/core/listener/tcp_listener"
+	"MyFlowHub-Core/internal/core/process"
 	"MyFlowHub-Core/internal/core/server"
+	"MyFlowHub-Core/internal/handler"
+)
+
+const (
+	// 使用 handler 包中的常量，保留这里方便 demo 注释引用
+	subProtoEcho  = handler.SubProtoEcho
+	subProtoUpper = handler.SubProtoUpper
 )
 
 // 该示例使用 MyFlowHub-Core 框架实现一个 TCP 服务端：
@@ -30,16 +38,27 @@ func main() {
 	addr := getenv("DEMO_ADDR", ":9000")
 	slog.Info("服务端启动", "listen", addr)
 
-	// 创建配置
+	procChannels := getenvInt("DEMO_PROC_CHANNELS", 2)
+	procWorkers := getenvInt("DEMO_PROC_WORKERS", 2)
+	procBuffer := getenvInt("DEMO_PROC_BUFFER", 128)
+
 	cfg := config.NewMap(map[string]string{
-		"addr": addr,
+		"addr":                       addr,
+		config.KeyProcChannelCount:   strconv.Itoa(procChannels),
+		config.KeyProcWorkersPerChan: strconv.Itoa(procWorkers),
+		config.KeyProcChannelBuffer:  strconv.Itoa(procBuffer),
 	})
 
 	// 创建连接管理器
 	cm := connmgr.New()
 
-	// 创建自定义 Process：收到消息后回显
-	proc := &EchoProcess{logger: slog.Default()}
+	dispatcher, err := buildProcess(cfg, slog.Default())
+	if err != nil {
+		slog.Error("创建 Process 失败", "err", err)
+		os.Exit(1)
+	}
+	ch, workers, buf := dispatcher.ConfigSnapshot()
+	slog.Info("Process pipeline ready", "channels", ch, "workers_per_channel", workers, "channel_buffer", buf)
 
 	// 创建 TCP 监听器
 	listener := tcp_listener.New(addr, tcp_listener.Options{
@@ -53,9 +72,9 @@ func main() {
 
 	// 创建 Server
 	srv, err := server.New(server.Options{
-		Name:     "EchoServer",
+		Name:     "DispatchServer",
 		Logger:   slog.Default(),
-		Process:  proc,
+		Process:  dispatcher,
 		Codec:    codec,
 		Listener: listener,
 		Config:   cfg,
@@ -93,66 +112,39 @@ func main() {
 	slog.Info("服务器已停止")
 }
 
-// EchoProcess 实现回显功能的处理器
-type EchoProcess struct {
-	logger *slog.Logger
-}
-
-func (p *EchoProcess) OnListen(conn core.IConnection) {
-	p.logger.Info("新连接建立", "id", conn.ID(), "remote", conn.RemoteAddr())
-}
-
-func (p *EchoProcess) OnReceive(ctx context.Context, conn core.IConnection, hdr header.IHeader, payload []byte) {
-	p.logger.Info("收到消息",
-		"conn", conn.ID(),
-		"payload_len", len(payload),
-		"payload", string(payload))
-
-	// 解析 header
-	h, ok := hdr.(header.HeaderTcp)
-	if !ok {
-		p.logger.Error("header 类型错误")
-		return
+func buildProcess(cfg core.IConfig, logger *slog.Logger) (*process.DispatcherProcess, error) {
+	base := process.NewPreRoutingProcess(logger)
+	dispatcher, err := process.NewDispatcherFromConfig(cfg, base, logger)
+	if err != nil {
+		return nil, err
 	}
-
-	// 构造回显响应
-	respPayload := []byte(fmt.Sprintf("ECHO: %s", string(payload)))
-	respHeader := header.HeaderTcp{
-		MsgID:      h.MsgID, // 使用相同的 MsgID
-		Source:     h.Target,
-		Target:     h.Source,
-		Timestamp:  uint32(time.Now().Unix()),
-		PayloadLen: uint32(len(respPayload)),
+	if err := dispatcher.RegisterHandler(handler.NewEchoHandler(logger)); err != nil {
+		return nil, err
 	}
-	respHeader.WithMajor(header.MajorOKResp).WithSubProto(h.SubProto())
-
-	// 获取 server 并发送响应
-	if srv, ok := ctx.Value("server").(core.IServer); ok && srv != nil {
-		if err := srv.Send(ctx, conn.ID(), respHeader, respPayload); err != nil {
-			p.logger.Error("发送响应失败", "err", err)
-		}
-	} else {
-		// 直接通过连接发送
-		codec := header.HeaderTcpCodec{}
-		if err := conn.SendWithHeader(respHeader, respPayload, codec); err != nil {
-			p.logger.Error("发送响应失败", "err", err)
-		}
+	if err := dispatcher.RegisterHandler(handler.NewUpperHandler(logger)); err != nil {
+		return nil, err
 	}
-}
-
-func (p *EchoProcess) OnSend(_ context.Context, conn core.IConnection, _ header.IHeader, payload []byte) error {
-	p.logger.Debug("发送消息", "conn", conn.ID(), "bytes", len(payload))
-	return nil
-}
-
-func (p *EchoProcess) OnClose(conn core.IConnection) {
-	p.logger.Info("连接关闭", "id", conn.ID())
+	if err := dispatcher.RegisterHandler(handler.NewLoginHandler(logger)); err != nil {
+		return nil, err
+	}
+	return dispatcher, nil
 }
 
 // getenv 读取环境变量，不存在则返回默认值
 func getenv(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return def
+}
+
+func getenvInt(k string, def int) int {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
 	}
 	return def
 }

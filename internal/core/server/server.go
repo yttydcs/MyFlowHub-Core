@@ -24,18 +24,20 @@ type Options struct {
 	Config        core.IConfig
 	Manager       core.IConnectionManager
 	ReaderFactory ReaderFactory
+	NodeID        uint32 // 可选：节点 ID，缺省为 1
 }
 
 // Server 是 IServer 的具体实现，负责协调 listener/manager/process。
 type Server struct {
-	opts  Options
-	log   *slog.Logger
-	cm    core.IConnectionManager
-	proc  core.IProcess
-	codec core.IHeaderCodec
-	cfg   core.IConfig
-	lst   core.IListener
-	rFac  ReaderFactory
+	opts   Options
+	log    *slog.Logger
+	cm     core.IConnectionManager
+	proc   core.IProcess
+	codec  core.IHeaderCodec
+	cfg    core.IConfig
+	lst    core.IListener
+	rFac   ReaderFactory
+	nodeID uint32
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -69,17 +71,24 @@ func New(opts Options) (*Server, error) {
 			return reader.NewTCP(opts.Logger)
 		}
 	}
+	if opts.NodeID == 0 {
+		opts.NodeID = 1
+	}
 	return &Server{
-		opts:  opts,
-		log:   opts.Logger,
-		cm:    opts.Manager,
-		proc:  opts.Process,
-		codec: opts.Codec,
-		cfg:   opts.Config,
-		lst:   opts.Listener,
-		rFac:  opts.ReaderFactory,
+		opts:   opts,
+		log:    opts.Logger,
+		cm:     opts.Manager,
+		proc:   opts.Process,
+		codec:  opts.Codec,
+		cfg:    opts.Config,
+		lst:    opts.Listener,
+		rFac:   opts.ReaderFactory,
+		nodeID: opts.NodeID,
 	}, nil
 }
+
+// context key 用于在处理链路中获取 server 引用
+type ctxKeyServer struct{}
 
 // Start 启动监听与连接循环。
 func (s *Server) Start(ctx context.Context) error {
@@ -89,6 +98,8 @@ func (s *Server) Start(ctx context.Context) error {
 		return errors.New("server already started")
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
+	// 在上下文中注入 server 引用以便路由/登录等处理使用
+	s.ctx = context.WithValue(s.ctx, ctxKeyServer{}, s)
 	s.cm.SetHooks(core.ConnectionHooks{
 		OnAdd: func(conn core.IConnection) {
 			s.proc.OnListen(conn)
@@ -146,6 +157,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	if cancel != nil {
 		cancel()
 	}
+	if d, ok := s.proc.(interface{ Shutdown() }); ok {
+		d.Shutdown()
+	}
 	_ = s.lst.Close()
 	done := make(chan struct{})
 	go func() {
@@ -164,6 +178,14 @@ func (s *Server) Config() core.IConfig                 { return s.cfg }
 func (s *Server) ConnManager() core.IConnectionManager { return s.cm }
 func (s *Server) Process() core.IProcess               { return s.proc }
 func (s *Server) HeaderCodec() core.IHeaderCodec       { return s.codec }
+func (s *Server) NodeID() uint32                       { return s.nodeID }
+func FromContextServer(ctx context.Context) *Server {
+	v := ctx.Value(ctxKeyServer{})
+	if srv, ok := v.(*Server); ok {
+		return srv
+	}
+	return nil
+}
 
 func (s *Server) Send(ctx context.Context, connID string, hdr header.IHeader, payload []byte) error {
 	conn, ok := s.cm.Get(connID)

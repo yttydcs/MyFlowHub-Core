@@ -45,6 +45,14 @@ type IProcess interface {
 	OnClose(conn IConnection)
 }
 
+// ISubProcess 子协议处理接口：Dispatcher 根据 SubProto 路由到对应实现。
+type ISubProcess interface {
+	// SubProto 返回该 handler 负责的子协议编号（0-63）。
+	SubProto() uint8
+	// OnReceive 处理指定子协议的数据帧。
+	OnReceive(ctx context.Context, conn IConnection, hdr header.IHeader, payload []byte)
+}
+
 // IHeaderCodec 头编解码接口：不同协议实现各自的头部序列化与反序列化。
 type IHeaderCodec interface {
 	// Encode 将 header 与 payload 编码为单个帧字节切片。

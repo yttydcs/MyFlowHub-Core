@@ -14,6 +14,11 @@ import (
 	"MyFlowHub-Core/internal/core/header"
 )
 
+const (
+	subProtoEcho  = 1
+	subProtoUpper = 2
+)
+
 // 该示例实现一个简单的 TCP 客户端，使用 HeaderTcp 协议：
 // 1) 连接到服务端（默认 127.0.0.1:9000，可通过环境变量 DEMO_ADDR 修改）；
 // 2) 定期发送带 Header 的消息；
@@ -92,7 +97,6 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			// 构造消息
 			payload := []byte(fmt.Sprintf("Hello from client, msg #%d", sent))
 			hdr := header.HeaderTcp{
 				MsgID:      uint32(sent + 1),
@@ -101,7 +105,11 @@ func main() {
 				Timestamp:  uint32(time.Now().Unix()),
 				PayloadLen: uint32(len(payload)),
 			}
-			hdr.WithMajor(header.MajorMsg).WithSubProto(1) // 子协议 1
+			sub := subProtoEcho
+			if sent%2 == 1 {
+				sub = subProtoUpper
+			}
+			hdr.WithMajor(header.MajorMsg).WithSubProto(uint8(sub))
 
 			// 编码并发送
 			frame, err := codec.Encode(hdr, payload)
@@ -117,6 +125,7 @@ func main() {
 
 			slog.Info("已发送",
 				"msgid", hdr.MsgID,
+				"subproto", sub,
 				"payload", string(payload))
 
 			sent++

@@ -99,6 +99,16 @@ PASS
   - 示例输出
   - 故障排查
 
+## 新增改进
+
+- ✅ 引入 `ISubProcess` 接口以及 `DispatcherProcess`：支持按 Header 子协议分发，配合可配置的 channel/worker 池，实现多协程处理 pipeline，并在 `server.Server.Stop` 时自动关闭 worker。
+- ✅ 扩展配置层：`config.MapConfig` 增加 process channel/worker/buffer 默认值；`DispatcherProcess` 提供 `NewDispatcherFromConfig` 和 `ConfigSnapshot` 便于实例化与观测。
+- ✅ 更新 demo：
+  - 服务端使用 Dispatcher，注册 Echo(子协议1) 与 Upper(子协议2) 处理器，可通过 `DEMO_PROC_*` 环境变量调节 channel/worker/buffer。
+  - 客户端交替发送不同子协议消息，展示多处理器调度效果。
+  - README 补充新的配置说明与示例输出。
+- ✅ 新增 `tests/dispatcher_test.go`，验证子协议路由与配置快照，保持 `go test ./...` 绿灯。
+
 ## 运行演示
 
 ### 1. 编译
@@ -279,4 +289,3 @@ if h.Flags & header.FlagCompressed != 0 {
 - ✅ 详细的文档（项目 README + Demo README）
 
 框架设计遵循 SOLID 原则，代码质量高，易于扩展和维护。Demo 演示了框架的核心功能，可以作为实际项目的起点。
-

@@ -8,13 +8,34 @@ type MapConfig struct {
 	data map[string]string
 }
 
+const (
+	KeyProcChannelCount   = "process.channel_count"
+	KeyProcWorkersPerChan = "process.workers_per_channel"
+	KeyProcChannelBuffer  = "process.channel_buffer"
+	KeySendChannelCount   = "send.channel_count"
+	KeySendWorkersPerChan = "send.workers_per_channel"
+	KeySendChannelBuffer  = "send.channel_buffer"
+)
+
 // NewMap 使用传入 map 构建 MapConfig；若 data 为空则初始化为空 map。
 func NewMap(data map[string]string) *MapConfig {
 	mc := &MapConfig{data: make(map[string]string)}
 	for k, v := range data {
 		mc.data[k] = v
 	}
+	ensureDefault(mc.data, KeyProcChannelCount, "1")
+	ensureDefault(mc.data, KeyProcWorkersPerChan, "1")
+	ensureDefault(mc.data, KeyProcChannelBuffer, "64")
+	ensureDefault(mc.data, KeySendChannelCount, "1")
+	ensureDefault(mc.data, KeySendWorkersPerChan, "1")
+	ensureDefault(mc.data, KeySendChannelBuffer, "64")
 	return mc
+}
+
+func ensureDefault(m map[string]string, key, val string) {
+	if _, ok := m[key]; !ok {
+		m[key] = val
+	}
 }
 
 // Get 实现 core.IConfig；返回值与是否存在。
