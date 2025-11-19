@@ -16,13 +16,8 @@ const (
 
 // ToHeaderTcp 尝试将通用 header.IHeader 转换为 header.HeaderTcp。
 func ToHeaderTcp(h header.IHeader) (header.HeaderTcp, bool) {
-	switch v := h.(type) {
-	case header.HeaderTcp:
-		return v, true
-	case *header.HeaderTcp:
-		if v != nil {
-			return *v, true
-		}
+	if v, ok := h.(*header.HeaderTcp); ok && v != nil {
+		return *v, true
 	}
 	return header.HeaderTcp{}, false
 }
@@ -44,7 +39,7 @@ func BuildResponse(req header.HeaderTcp, payloadLen uint32, sub uint8) header.He
 func SendResponse(log *slog.Logger, conn core.IConnection, req header.HeaderTcp, payload []byte, sub uint8) {
 	codec := header.HeaderTcpCodec{}
 	resp := BuildResponse(req, uint32(len(payload)), sub)
-	if err := conn.SendWithHeader(resp, payload, codec); err != nil {
+	if err := conn.SendWithHeader(&resp, payload, codec); err != nil {
 		if log != nil {
 			log.Error("发送响应失败", "err", err)
 		}

@@ -77,7 +77,7 @@ func main() {
 		select {
 		case <-ticker.C:
 			payload := []byte(fmt.Sprintf("Hello from node %d, msg #%d", myID, sent))
-			hdr := header.HeaderTcp{
+			hdr := &header.HeaderTcp{
 				MsgID:      uint32(sent + 1),
 				Source:     myID,
 				Target:     uint32(targetID),
@@ -109,7 +109,7 @@ func main() {
 
 func loginAndGetID(conn net.Conn, codec header.HeaderTcpCodec) (uint32, error) {
 	// 发送登录请求（SubProto=2），Target=1（默认 server）
-	hdr := header.HeaderTcp{
+	hdr := &header.HeaderTcp{
 		MsgID:      1,
 		Source:     0,
 		Target:     1,
@@ -129,7 +129,7 @@ func loginAndGetID(conn net.Conn, codec header.HeaderTcpCodec) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	resp, ok := h.(header.HeaderTcp)
+	resp, ok := h.(*header.HeaderTcp)
 	if !ok || resp.Major() != header.MajorOKResp || resp.SubProto() != subProtoLogin {
 		return 0, fmt.Errorf("unexpected login response header: %+v", h)
 	}
@@ -159,7 +159,7 @@ func recvLoop(conn net.Conn, codec header.HeaderTcpCodec, myID uint32) {
 			return
 		}
 
-		hdr, ok := h.(header.HeaderTcp)
+		hdr, ok := h.(*header.HeaderTcp)
 		if !ok {
 			slog.Error("header 类型错误")
 			continue
@@ -169,7 +169,7 @@ func recvLoop(conn net.Conn, codec header.HeaderTcpCodec, myID uint32) {
 		case header.MajorMsg:
 			// 如果我是目标，且子协议为1，则按规则回显
 			if hdr.Target == myID && hdr.SubProto() == subProtoEcho {
-				resp := header.HeaderTcp{
+				resp := &header.HeaderTcp{
 					MsgID:      hdr.MsgID,
 					Source:     myID,
 					Target:     hdr.Source,

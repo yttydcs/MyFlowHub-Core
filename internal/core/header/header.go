@@ -2,12 +2,34 @@ package header
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 )
 
-// IHeader 表示帧头接口的占位类型，具体实现由不同协议版本提供。
-type IHeader any
+// IHeader 定义协议头的通用接口：提供当前 TCP 头部的全部只读访问方法，并提供修改方法（流式）。
+// 注意：具体实现需使用指针接收者实现修改方法，以便原地修改。
+type IHeader interface {
+	// 读取方法
+	Major() uint8
+	SubProto() uint8
+	SourceID() uint32
+	TargetID() uint32
+	GetFlags() uint8
+	GetMsgID() uint32
+	GetTimestamp() uint32
+	PayloadLength() uint32
+	GetReserved() uint16
+
+	// 修改方法（返回 IHeader 以支持链式调用）
+	WithMajor(uint8) IHeader
+	WithSubProto(uint8) IHeader
+	WithSourceID(uint32) IHeader
+	WithTargetID(uint32) IHeader
+	WithFlags(uint8) IHeader
+	WithMsgID(uint32) IHeader
+	WithTimestamp(uint32) IHeader
+	WithPayloadLength(uint32) IHeader
+	WithReserved(uint16) IHeader
+}
 
 // 头部字节序：所有多字节字段均使用网络字节序（大端）。
 // TypeFmt 的位定义（低位优先）：
@@ -55,17 +77,34 @@ func (h HeaderTcp) Major() uint8 { return h.TypeFmt & 0x03 }
 // SubProto 返回子协议（TypeFmt 的 bit2..7）。
 func (h HeaderTcp) SubProto() uint8 { return (h.TypeFmt >> 2) & 0x3F }
 
+// Getter 适配 IHeader
+func (h HeaderTcp) SourceID() uint32      { return h.Source }
+func (h HeaderTcp) TargetID() uint32      { return h.Target }
+func (h HeaderTcp) GetFlags() uint8       { return h.Flags }
+func (h HeaderTcp) GetMsgID() uint32      { return h.MsgID }
+func (h HeaderTcp) GetTimestamp() uint32  { return h.Timestamp }
+func (h HeaderTcp) PayloadLength() uint32 { return h.PayloadLen }
+func (h HeaderTcp) GetReserved() uint16   { return h.Reserved }
+
 // WithMajor 设置消息大类（不会修改子协议位）。
-func (h *HeaderTcp) WithMajor(major uint8) *HeaderTcp {
+func (h *HeaderTcp) WithMajor(major uint8) IHeader {
 	h.TypeFmt = (h.TypeFmt &^ 0x03) | (major & 0x03)
 	return h
 }
 
 // WithSubProto 设置子协议（不会修改大类位）。
-func (h *HeaderTcp) WithSubProto(sub uint8) *HeaderTcp {
+func (h *HeaderTcp) WithSubProto(sub uint8) IHeader {
 	h.TypeFmt = (h.TypeFmt &^ 0xFC) | ((sub & 0x3F) << 2)
 	return h
 }
+
+func (h *HeaderTcp) WithSourceID(v uint32) IHeader      { h.Source = v; return h }
+func (h *HeaderTcp) WithTargetID(v uint32) IHeader      { h.Target = v; return h }
+func (h *HeaderTcp) WithFlags(v uint8) IHeader          { h.Flags = v; return h }
+func (h *HeaderTcp) WithMsgID(v uint32) IHeader         { h.MsgID = v; return h }
+func (h *HeaderTcp) WithTimestamp(v uint32) IHeader     { h.Timestamp = v; return h }
+func (h *HeaderTcp) WithPayloadLength(v uint32) IHeader { h.PayloadLen = v; return h }
+func (h *HeaderTcp) WithReserved(v uint16) IHeader      { h.Reserved = v; return h }
 
 // HeaderTcpCodec 提供 HeaderTcp 的编解码。
 type HeaderTcpCodec struct{}
@@ -74,21 +113,27 @@ const headerTcpSize = 24
 
 // Encode 将 HeaderTcp 与 payload 编码为 [header || payload]。
 func (HeaderTcpCodec) Encode(header IHeader, payload []byte) ([]byte, error) {
-	h, ok := header.(HeaderTcp)
-	if !ok {
-		if hp, ok2 := header.(*HeaderTcp); ok2 && hp != nil {
-			h = *hp
-		} else {
-			return nil, fmt.Errorf("HeaderTcpCodec: expect HeaderTcp or *HeaderTcp, got %T", header)
+	var h HeaderTcp
+	if hp, ok := header.(*HeaderTcp); ok && hp != nil {
+		h = *hp
+	} else {
+		// 从通用接口还原 TCP 头布局
+		h = HeaderTcp{
+			TypeFmt:    (header.Major() & 0x03) | ((header.SubProto() & 0x3F) << 2),
+			Flags:      header.GetFlags(),
+			MsgID:      header.GetMsgID(),
+			Source:     header.SourceID(),
+			Target:     header.TargetID(),
+			Timestamp:  header.GetTimestamp(),
+			PayloadLen: header.PayloadLength(),
+			Reserved:   header.GetReserved(),
 		}
 	}
 	if uint32(len(payload)) != h.PayloadLen {
-		// 若未对齐，以 payload 实际长度为准并覆盖；避免不一致。
 		h.PayloadLen = uint32(len(payload))
 	}
 
 	buf := make([]byte, headerTcpSize+len(payload))
-	// 固定头 24B。
 	buf[0] = h.TypeFmt
 	buf[1] = h.Flags
 	binary.BigEndian.PutUint32(buf[2:6], h.MsgID)
@@ -118,11 +163,11 @@ func (HeaderTcpCodec) Decode(r io.Reader) (IHeader, []byte, error) {
 		Reserved:   binary.BigEndian.Uint16(hdr[22:24]),
 	}
 	if h.PayloadLen == 0 {
-		return h, nil, nil
+		return &h, nil, nil
 	}
 	payload := make([]byte, h.PayloadLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, nil, err
 	}
-	return h, payload, nil
+	return &h, payload, nil
 }

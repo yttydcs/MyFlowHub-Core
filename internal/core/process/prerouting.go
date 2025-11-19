@@ -60,24 +60,23 @@ func (p *PreRoutingProcess) OnReceive(ctx context.Context, conn core.IConnection
 		p.log.Warn("无法获取 server 上下文，跳过路由")
 		return
 	}
-	hreq, ok := toHeaderTcp(hdr)
-	if !ok {
-		p.log.Warn("无法转换 HeaderTcp，跳过路由")
+	if hdr == nil {
+		p.log.Warn("空头部，跳过")
 		return
 	}
-	target := hreq.Target
+	target := hdr.TargetID()
 	local := srv.NodeID()
 
 	// 广播
 	if target == 0 {
-		p.log.Info("广播消息", "from", hreq.Source, "subproto", hreq.SubProto())
+		p.log.Info("广播消息", "from", hdr.SourceID(), "subproto", hdr.SubProto())
 		srv.ConnManager().Range(func(c core.IConnection) bool {
 			if c.ID() != conn.ID() {
 				if !p.forwardMode {
 					return true
 				}
 				p.forwardOrDrop(func() error {
-					return c.SendWithHeader(hreq, payload, srv.HeaderCodec())
+					return c.SendWithHeader(hdr, payload, srv.HeaderCodec())
 				})
 			}
 			return true
@@ -90,13 +89,13 @@ func (p *PreRoutingProcess) OnReceive(ctx context.Context, conn core.IConnection
 			p.log.Debug("转发功能已禁用，丢弃跨节点消息", "target", target, "local", local)
 			return
 		}
-		p.log.Info("转发消息", "from", hreq.Source, "to", target, "subproto", hreq.SubProto())
+		p.log.Info("转发消息", "from", hdr.SourceID(), "to", target, "subproto", hdr.SubProto())
 		var forwarded bool
 		srv.ConnManager().Range(func(c core.IConnection) bool {
 			if meta, ok := c.GetMeta("nodeID"); ok {
 				if nid, ok2 := meta.(uint32); ok2 && nid == target {
 					p.forwardOrDrop(func() error {
-						return c.SendWithHeader(hreq, payload, srv.HeaderCodec())
+						return c.SendWithHeader(hdr, payload, srv.HeaderCodec())
 					})
 					forwarded = true
 					return false
@@ -129,16 +128,4 @@ func extractServer(ctx context.Context) core.IServer {
 		return srv
 	}
 	return nil
-}
-
-func toHeaderTcp(h header.IHeader) (header.HeaderTcp, bool) {
-	switch v := h.(type) {
-	case header.HeaderTcp:
-		return v, true
-	case *header.HeaderTcp:
-		if v != nil {
-			return *v, true
-		}
-	}
-	return header.HeaderTcp{}, false
 }

@@ -146,3 +146,6 @@ type IReader interface {
 	// ReadLoop 使用提供的 IHeaderCodec 持续从 conn 读取帧，并在合适时机触发 IConnection 的接收事件。
 	ReadLoop(ctx context.Context, conn IConnection, hc IHeaderCodec) error
 }
+
+// 移除 IRoutingHeader，统一使用 header.IHeader 作为通用头接口。
+// 任何协议头实现 header.IHeader 后，即可被路由、分发与编码器统一处理。

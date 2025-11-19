@@ -42,9 +42,9 @@ func TestDispatcherRoutesSubProtocols(t *testing.T) {
 	}
 
 	conn := &mockConnection{id: "test-conn"}
-	hdrEcho := header.HeaderTcp{}
+	hdrEcho := &header.HeaderTcp{}
 	hdrEcho.WithSubProto(testSubProtoEcho)
-	hdrUpper := header.HeaderTcp{}
+	hdrUpper := &header.HeaderTcp{}
 	hdrUpper.WithSubProto(testSubProtoUpper)
 
 	dispatcher.OnReceive(context.Background(), conn, hdrEcho, []byte("hello"))

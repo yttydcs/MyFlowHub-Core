@@ -161,17 +161,10 @@ func (p *DispatcherProcess) route(evt dispatchEvent) {
 }
 
 func extractSubProto(h header.IHeader) (uint8, bool) {
-	switch v := h.(type) {
-	case header.HeaderTcp:
-		return v.SubProto(), true
-	case *header.HeaderTcp:
-		return v.SubProto(), true
+	if h == nil {
+		return 0, false
 	}
-	type subProto interface{ SubProto() uint8 }
-	if sp, ok := h.(subProto); ok {
-		return sp.SubProto(), true
-	}
-	return 0, false
+	return h.SubProto(), true
 }
 
 func (p *DispatcherProcess) getHandler(sub uint8) core.ISubProcess {

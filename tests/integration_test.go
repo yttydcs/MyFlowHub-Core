@@ -129,6 +129,99 @@ func TestHeaderCodecIntegration(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// 使用指针以满足 IHeader（含修改方法）
+			h := &tc.header
+			h.WithMajor(header.MajorMsg).WithSubProto(7)
+
+			// 编码
+			frame, err := codec.Encode(h, tc.payload)
+			if err != nil {
+				t.Fatalf("编码失败: %v", err)
+			}
+
+			// 解码
+			buf := bytes.NewReader(frame)
+			gotH, gotPayload, err := codec.Decode(buf)
+			if err != nil {
+				t.Fatalf("解码失败: %v", err)
+			}
+
+			// 验证 header
+			vh, ok := gotH.(*header.HeaderTcp)
+			if !ok {
+				t.Fatalf("header 类型错误: %T", gotH)
+			}
+
+			if vh.Major() != header.MajorMsg {
+				t.Errorf("Major 不匹配: got %d, want %d", vh.Major(), header.MajorMsg)
+			}
+			if vh.SubProto() != 7 {
+				t.Errorf("SubProto 不匹配: got %d, want 7", vh.SubProto())
+			}
+			if vh.MsgID != tc.header.MsgID {
+				t.Errorf("MsgID 不匹配: got %d, want %d", vh.MsgID, tc.header.MsgID)
+			}
+			if vh.Source != tc.header.Source {
+				t.Errorf("Source 不匹配: got 0x%08X, want 0x%08X", vh.Source, tc.header.Source)
+			}
+			if vh.Target != tc.header.Target {
+				t.Errorf("Target 不匹配: got 0x%08X, want 0x%08X", vh.Target, tc.header.Target)
+			}
+
+			// 验证 payload
+			if !bytes.Equal(gotPayload, tc.payload) {
+				t.Errorf("payload 不匹配: got %d bytes, want %d bytes", len(gotPayload), len(tc.payload))
+			}
+		})
+	}
+}
+
+// TestHeaderCodecVariousFrames 测试 header 编解码的各种帧
+func TestHeaderCodecVariousFrames(t *testing.T) {
+	codec := header.HeaderTcpCodec{}
+
+	testCases := []struct {
+		name    string
+		header  *header.HeaderTcp // 修改为指针类型
+		payload []byte
+	}{
+		{
+			name: "空payload",
+			header: &header.HeaderTcp{
+				MsgID:      1,
+				Source:     0x11223344,
+				Target:     0x55667788,
+				Timestamp:  uint32(time.Now().Unix()),
+				PayloadLen: 0,
+			},
+			payload: nil,
+		},
+		{
+			name: "小payload",
+			header: &header.HeaderTcp{
+				MsgID:      2,
+				Source:     0xAABBCCDD,
+				Target:     0xEEFF0011,
+				Timestamp:  uint32(time.Now().Unix()),
+				PayloadLen: 5,
+			},
+			payload: []byte("hello"),
+		},
+		{
+			name: "大payload",
+			header: &header.HeaderTcp{
+				MsgID:      3,
+				Source:     0x12345678,
+				Target:     0x9ABCDEF0,
+				Timestamp:  uint32(time.Now().Unix()),
+				PayloadLen: 1024,
+			},
+			payload: bytes.Repeat([]byte("X"), 1024),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
 			tc.header.WithMajor(header.MajorMsg).WithSubProto(7)
 
 			// 编码
@@ -145,7 +238,7 @@ func TestHeaderCodecIntegration(t *testing.T) {
 			}
 
 			// 验证 header
-			vh, ok := gotH.(header.HeaderTcp)
+			vh, ok := gotH.(*header.HeaderTcp)
 			if !ok {
 				t.Fatalf("header 类型错误: %T", gotH)
 			}
