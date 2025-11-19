@@ -9,12 +9,13 @@ type MapConfig struct {
 }
 
 const (
-	KeyProcChannelCount   = "process.channel_count"
-	KeyProcWorkersPerChan = "process.workers_per_channel"
-	KeyProcChannelBuffer  = "process.channel_buffer"
-	KeySendChannelCount   = "send.channel_count"
-	KeySendWorkersPerChan = "send.workers_per_channel"
-	KeySendChannelBuffer  = "send.channel_buffer"
+	KeyProcChannelCount     = "process.channel_count"
+	KeyProcWorkersPerChan   = "process.workers_per_channel"
+	KeyProcChannelBuffer    = "process.channel_buffer"
+	KeySendChannelCount     = "send.channel_count"
+	KeySendWorkersPerChan   = "send.workers_per_channel"
+	KeySendChannelBuffer    = "send.channel_buffer"
+	KeyRoutingForwardRemote = "routing.forward_remote"
 )
 
 // NewMap 使用传入 map 构建 MapConfig；若 data 为空则初始化为空 map。
@@ -29,6 +30,7 @@ func NewMap(data map[string]string) *MapConfig {
 	ensureDefault(mc.data, KeySendChannelCount, "1")
 	ensureDefault(mc.data, KeySendWorkersPerChan, "1")
 	ensureDefault(mc.data, KeySendChannelBuffer, "64")
+	ensureDefault(mc.data, KeyRoutingForwardRemote, "true")
 	return mc
 }
 

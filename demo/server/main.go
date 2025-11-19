@@ -21,12 +21,6 @@ import (
 	"MyFlowHub-Core/internal/handler"
 )
 
-const (
-	// 使用 handler 包中的常量，保留这里方便 demo 注释引用
-	subProtoEcho  = handler.SubProtoEcho
-	subProtoUpper = handler.SubProtoUpper
-)
-
 // 该示例使用 MyFlowHub-Core 框架实现一个 TCP 服务端：
 // 1) 使用 HeaderTcp 协议进行消息帧编解码；
 // 2) 支持消息回显：收到什么返回什么，payload 前缀 "ECHO: "；
@@ -127,6 +121,7 @@ func main() {
 
 func buildProcess(cfg core.IConfig, logger *slog.Logger) (*process.DispatcherProcess, error) {
 	base := process.NewPreRoutingProcess(logger)
+	base.WithConfig(cfg)
 	dispatcher, err := process.NewDispatcherFromConfig(cfg, base, logger)
 	if err != nil {
 		return nil, err
@@ -169,8 +164,8 @@ func getenvInt(k string, def int) int {
 //	LOG_CALLER=true|false（默认 false）
 func initLoggerFromEnv() {
 	lv := strings.TrimSpace(strings.ToUpper(getenv("LOG_LEVEL", "INFO")))
-	jsonOut := parseBool(getenv("LOG_JSON", "false"), false)
-	addSource := parseBool(getenv("LOG_CALLER", "false"), false)
+	jsonOut := core.ParseBool(getenv("LOG_JSON", "false"), false)
+	addSource := core.ParseBool(getenv("LOG_CALLER", "false"), false)
 
 	level := new(slog.LevelVar)
 	switch lv {
@@ -184,23 +179,12 @@ func initLoggerFromEnv() {
 		level.Set(slog.LevelInfo)
 	}
 
-	h := slog.HandlerOptions{Level: level, AddSource: addSource}
-	var handler slog.Handler
+	opts := slog.HandlerOptions{Level: level, AddSource: addSource}
+	var h slog.Handler
 	if jsonOut {
-		handler = slog.NewJSONHandler(os.Stdout, &h)
+		h = slog.NewJSONHandler(os.Stdout, &opts)
 	} else {
-		handler = slog.NewTextHandler(os.Stdout, &h)
+		h = slog.NewTextHandler(os.Stdout, &opts)
 	}
-	slog.SetDefault(slog.New(handler))
-}
-
-func parseBool(s string, def bool) bool {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "true" || s == "1" || s == "yes" || s == "y" {
-		return true
-	}
-	if s == "false" || s == "0" || s == "no" || s == "n" {
-		return false
-	}
-	return def
+	slog.SetDefault(slog.New(h))
 }

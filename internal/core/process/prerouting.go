@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	core "MyFlowHub-Core/internal/core"
+	coreconfig "MyFlowHub-Core/internal/core/config"
 	"MyFlowHub-Core/internal/core/header"
 )
 
@@ -15,19 +16,38 @@ import (
 // 3. target==local => 继续 dispatcher 后续子协议处理。
 // 依赖：连接元数据中存在 nodeID（由登录协议写入）。
 
-type PreRoutingProcess struct{ log *slog.Logger }
+type PreRoutingProcess struct {
+	log         *slog.Logger
+	cfg         core.IConfig
+	forwardMode bool
+}
 
 func NewPreRoutingProcess(log *slog.Logger) *PreRoutingProcess {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &PreRoutingProcess{log: log}
+	return &PreRoutingProcess{log: log, forwardMode: true}
+}
+
+func (p *PreRoutingProcess) WithConfig(cfg core.IConfig) *PreRoutingProcess {
+	p.cfg = cfg
+	if cfg != nil {
+		if raw, ok := cfg.Get(coreconfig.KeyRoutingForwardRemote); ok {
+			p.forwardMode = core.ParseBool(raw, true)
+		}
+	}
+	return p
+}
+
+func (p *PreRoutingProcess) WithForwardMode(enable bool) *PreRoutingProcess {
+	p.forwardMode = enable
+	return p
 }
 
 func (p *PreRoutingProcess) OnListen(conn core.IConnection) {
 	p.log.Info("新连接", "id", conn.ID(), "remote", conn.RemoteAddr())
 }
-func (p *PreRoutingProcess) OnSend(ctx context.Context, conn core.IConnection, hdr header.IHeader, payload []byte) error {
+func (p *PreRoutingProcess) OnSend(_ context.Context, _ core.IConnection, _ header.IHeader, _ []byte) error {
 	return nil
 }
 func (p *PreRoutingProcess) OnClose(conn core.IConnection) {
@@ -35,8 +55,7 @@ func (p *PreRoutingProcess) OnClose(conn core.IConnection) {
 }
 
 func (p *PreRoutingProcess) OnReceive(ctx context.Context, conn core.IConnection, hdr header.IHeader, payload []byte) {
-	val := ctx.Value(struct{ S string }{"server"})
-	srv, _ := val.(core.IServer)
+	srv := extractServer(ctx)
 	if srv == nil {
 		p.log.Warn("无法获取 server 上下文，跳过路由")
 		return
@@ -54,21 +73,31 @@ func (p *PreRoutingProcess) OnReceive(ctx context.Context, conn core.IConnection
 		p.log.Info("广播消息", "from", hreq.Source, "subproto", hreq.SubProto())
 		srv.ConnManager().Range(func(c core.IConnection) bool {
 			if c.ID() != conn.ID() {
-				_ = c.SendWithHeader(hreq, payload, srv.HeaderCodec())
+				if !p.forwardMode {
+					return true
+				}
+				p.forwardOrDrop(func() error {
+					return c.SendWithHeader(hreq, payload, srv.HeaderCodec())
+				})
 			}
 			return true
 		})
 		return
 	}
 
-	// 转发
 	if target != local {
+		if !p.forwardMode {
+			p.log.Debug("转发功能已禁用，丢弃跨节点消息", "target", target, "local", local)
+			return
+		}
 		p.log.Info("转发消息", "from", hreq.Source, "to", target, "subproto", hreq.SubProto())
 		var forwarded bool
 		srv.ConnManager().Range(func(c core.IConnection) bool {
 			if meta, ok := c.GetMeta("nodeID"); ok {
 				if nid, ok2 := meta.(uint32); ok2 && nid == target {
-					_ = c.SendWithHeader(hreq, payload, srv.HeaderCodec())
+					p.forwardOrDrop(func() error {
+						return c.SendWithHeader(hreq, payload, srv.HeaderCodec())
+					})
 					forwarded = true
 					return false
 				}
@@ -81,6 +110,25 @@ func (p *PreRoutingProcess) OnReceive(ctx context.Context, conn core.IConnection
 		return
 	}
 	// 本地：继续 dispatcher 的后续处理。
+}
+
+func (p *PreRoutingProcess) forwardOrDrop(sendFn func() error) {
+	if !p.forwardMode {
+		return
+	}
+	if err := sendFn(); err != nil {
+		p.log.Error("转发失败", "err", err)
+	}
+}
+
+func extractServer(ctx context.Context) core.IServer {
+	if ctx == nil {
+		return nil
+	}
+	if srv, ok := ctx.Value(struct{ S string }{"server"}).(core.IServer); ok {
+		return srv
+	}
+	return nil
 }
 
 func toHeaderTcp(h header.IHeader) (header.HeaderTcp, bool) {
