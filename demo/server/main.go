@@ -129,9 +129,7 @@ func buildProcess(cfg core.IConfig, logger *slog.Logger) (*process.DispatcherPro
 	if err := dispatcher.RegisterHandler(handler.NewEchoHandler(logger)); err != nil {
 		return nil, err
 	}
-	if err := dispatcher.RegisterHandler(handler.NewUpperHandler(logger)); err != nil {
-		return nil, err
-	}
+	// Upper handler removed
 	if err := dispatcher.RegisterHandler(handler.NewLoginHandler(logger)); err != nil {
 		return nil, err
 	}

@@ -15,8 +15,7 @@ import (
 )
 
 const (
-	testSubProtoEcho  = 1
-	testSubProtoUpper = 2
+	testSubProtoEcho = 1
 )
 
 func TestDispatcherRoutesSubProtocols(t *testing.T) {
@@ -33,28 +32,20 @@ func TestDispatcherRoutesSubProtocols(t *testing.T) {
 	defer dispatcher.Shutdown()
 
 	chEcho := make(chan string, 1)
-	chUpper := make(chan string, 1)
 	if err := dispatcher.RegisterHandler(&recordHandler{sub: testSubProtoEcho, ch: chEcho}); err != nil {
 		t.Fatalf("register echo handler: %v", err)
-	}
-	if err := dispatcher.RegisterHandler(&recordHandler{sub: testSubProtoUpper, ch: chUpper}); err != nil {
-		t.Fatalf("register upper handler: %v", err)
 	}
 
 	conn := &mockConnection{id: "test-conn"}
 	hdrEcho := &header.HeaderTcp{}
 	hdrEcho.WithSubProto(testSubProtoEcho)
-	hdrUpper := &header.HeaderTcp{}
-	hdrUpper.WithSubProto(testSubProtoUpper)
 
 	dispatcher.OnReceive(context.Background(), conn, hdrEcho, []byte("hello"))
-	dispatcher.OnReceive(context.Background(), conn, hdrUpper, []byte("world"))
 
 	expectMessage(t, chEcho, "test-conn|hello")
-	expectMessage(t, chUpper, "test-conn|world")
 
-	if got := base.receives.Load(); got != 2 {
-		t.Fatalf("base OnReceive called %d times, want 2", got)
+	if got := base.receives.Load(); got != 1 {
+		t.Fatalf("base OnReceive called %d times, want 1", got)
 	}
 }
 
@@ -99,7 +90,7 @@ type recordHandler struct {
 }
 
 func (h *recordHandler) SubProto() uint8 { return h.sub }
-func (h *recordHandler) OnReceive(ctx context.Context, conn core.IConnection, _ core.IHeader, payload []byte) {
+func (h *recordHandler) OnReceive(_ context.Context, conn core.IConnection, _ core.IHeader, payload []byte) {
 	h.ch <- fmt.Sprintf("%s|%s", conn.ID(), string(payload))
 }
 

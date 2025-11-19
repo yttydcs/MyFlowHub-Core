@@ -3,6 +3,7 @@ package header
 import (
 	"encoding/binary"
 	"io"
+	"time"
 
 	core "MyFlowHub-Core/internal/core"
 )
@@ -141,4 +142,37 @@ func (HeaderTcpCodec) Decode(r io.Reader) (core.IHeader, []byte, error) {
 		return nil, nil, err
 	}
 	return &h, payload, nil
+}
+
+func CloneToTCP(src core.IHeader) *HeaderTcp {
+	if src == nil {
+		return &HeaderTcp{}
+	}
+	if existing, ok := src.(*HeaderTcp); ok && existing != nil {
+		clone := *existing
+		return &clone
+	}
+	clone := &HeaderTcp{}
+	clone.WithMajor(src.Major()).
+		WithSubProto(src.SubProto()).
+		WithSourceID(src.SourceID()).
+		WithTargetID(src.TargetID()).
+		WithFlags(src.GetFlags()).
+		WithMsgID(src.GetMsgID()).
+		WithTimestamp(src.GetTimestamp()).
+		WithPayloadLength(src.PayloadLength()).
+		WithReserved(src.GetReserved())
+	return clone
+}
+
+func BuildTCPResponse(req core.IHeader, payloadLen uint32, sub uint8) *HeaderTcp {
+	resp := CloneToTCP(req)
+	resp.WithMajor(MajorOKResp).
+		WithSubProto(sub).
+		WithSourceID(req.TargetID()).
+		WithTargetID(req.SourceID()).
+		WithMsgID(req.GetMsgID()).
+		WithTimestamp(uint32(time.Now().Unix())).
+		WithPayloadLength(payloadLen)
+	return resp
 }

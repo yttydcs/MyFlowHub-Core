@@ -34,10 +34,6 @@ func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr
 	conn.SetMeta("nodeID", id)
 	respObj := map[string]uint32{"id": id}
 	data, _ := json.Marshal(respObj)
-	req, ok := ToHeaderTcp(hdr)
-	if !ok {
-		h.log.Error("login header 类型错误")
-		return
-	}
+	req := CloneRequest(hdr)
 	SendResponse(h.log, conn, req, data, h.SubProto())
 }

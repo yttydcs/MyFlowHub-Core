@@ -24,12 +24,8 @@ func (h *EchoHandler) SubProto() uint8 { return SubProtoEcho }
 
 func (h *EchoHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	_ = ctx
-	tcp, ok := ToHeaderTcp(hdr)
-	if !ok {
-		h.log.Error("header 类型错误")
-		return
-	}
+	req := CloneRequest(hdr)
 	respPayload := []byte(fmt.Sprintf("ECHO: %s", string(payload)))
 	h.log.Info("EchoHandler", "conn", conn.ID(), "payload", string(payload))
-	SendResponse(h.log, conn, tcp, respPayload, h.SubProto())
+	SendResponse(h.log, conn, req, respPayload, h.SubProto())
 }
