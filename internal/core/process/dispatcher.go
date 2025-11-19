@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -21,6 +20,7 @@ type DispatchOptions struct {
 	WorkersPerChan int
 	ChannelBuffer  int
 	Base           core.IProcess
+	Strategy       QueueSelectStrategy
 }
 
 type dispatchEvent struct {
@@ -39,6 +39,8 @@ type DispatcherProcess struct {
 	queues         []chan dispatchEvent
 	chanCount      int
 	workersPerChan int
+
+	strategy QueueSelectStrategy
 
 	startOnce  sync.Once
 	runtimeCtx context.Context
@@ -66,6 +68,9 @@ func NewDispatcher(opts DispatchOptions) (*DispatcherProcess, error) {
 	for i := range queues {
 		queues[i] = make(chan dispatchEvent, opts.ChannelBuffer)
 	}
+	if opts.Strategy == nil { // allow future extension in options
+		opts.Strategy = ConnHashStrategy{}
+	}
 	return &DispatcherProcess{
 		log:            log,
 		base:           opts.Base,
@@ -73,17 +78,25 @@ func NewDispatcher(opts DispatchOptions) (*DispatcherProcess, error) {
 		queues:         queues,
 		chanCount:      opts.ChannelCount,
 		workersPerChan: opts.WorkersPerChan,
+		strategy:       opts.Strategy,
 	}, nil
 }
 
 // NewDispatcherFromConfig 根据配置创建 DispatcherProcess。
 func NewDispatcherFromConfig(cfg core.IConfig, base core.IProcess, logger *slog.Logger) (*DispatcherProcess, error) {
+	rawStrategy := ""
+	if cfg != nil {
+		if v, ok := cfg.Get(coreconfig.KeyProcQueueStrategy); ok {
+			rawStrategy = v
+		}
+	}
 	opts := DispatchOptions{
 		Logger:         logger,
 		Base:           base,
 		ChannelCount:   readPositiveInt(cfg, coreconfig.KeyProcChannelCount, 1),
 		WorkersPerChan: readPositiveInt(cfg, coreconfig.KeyProcWorkersPerChan, 1),
 		ChannelBuffer:  readPositiveInt(cfg, coreconfig.KeyProcChannelBuffer, 64),
+		Strategy:       StrategyFromConfig(rawStrategy),
 	}
 	return NewDispatcher(opts)
 }
@@ -139,25 +152,56 @@ func (p *DispatcherProcess) ensureRuntime(ctx context.Context) {
 	})
 }
 
-func (p *DispatcherProcess) route(evt dispatchEvent) {
-	if p.base != nil {
-		p.base.OnReceive(evt.ctx, evt.conn, evt.hdr, evt.payload)
+type preRouteDecider interface {
+	PreRoute(ctx context.Context, conn core.IConnection, hdr header.IHeader, payload []byte) bool
+}
+
+// preRouteDecider 可选接口：基础流程可实现以在子协议分发前决定是否继续。
+// 默认实现直接调用 OnReceive，子类可选择覆盖。
+func (p *DispatcherProcess) preRoute(ctx context.Context, conn core.IConnection, hdr header.IHeader, payload []byte) bool {
+	if p.base == nil {
+		return true
 	}
-	sub, ok := extractSubProto(evt.hdr)
+	if pr, ok := p.base.(preRouteDecider); ok {
+		return pr.PreRoute(ctx, conn, hdr, payload)
+	}
+	p.base.OnReceive(ctx, conn, hdr, payload)
+	return true
+}
+
+func (p *DispatcherProcess) selectHandler(hdr header.IHeader) (core.ISubProcess, uint8) {
+	sub, ok := extractSubProto(hdr)
 	if !ok {
-		if p.base == nil {
-			p.log.Warn("header lacks SubProto", "conn", evt.conn.ID())
-		}
-		return
+		return nil, 0
 	}
-	handler := p.getHandler(sub)
+	h := p.getHandler(sub)
+	return h, sub
+}
+
+func (p *DispatcherProcess) callHandler(ctx context.Context, handler core.ISubProcess, conn core.IConnection, hdr header.IHeader, payload []byte) {
 	if handler == nil {
-		if p.base == nil {
-			p.log.Warn("no handler for sub proto", "subproto", sub, "conn", evt.conn.ID())
-		}
 		return
 	}
-	handler.OnReceive(evt.ctx, evt.conn, evt.hdr, evt.payload)
+	// panic 防护，避免单个 handler 崩溃影响整个 worker。
+	defer func() {
+		if r := recover(); r != nil {
+			p.log.Error("handler panic", "recover", r, "subproto", handler.SubProto(), "conn", conn.ID())
+		}
+	}()
+	handler.OnReceive(ctx, conn, hdr, payload)
+}
+
+// route 现在仅组合三步。
+func (p *DispatcherProcess) route(evt dispatchEvent) {
+	if !p.preRoute(evt.ctx, evt.conn, evt.hdr, evt.payload) {
+		return
+	}
+	handler, sub := p.selectHandler(evt.hdr)
+	if handler == nil {
+		p.log.Warn("no handler for sub proto", "subproto", sub, "conn", evt.conn.ID())
+		return
+	}
+	p.callHandler(evt.ctx, handler, evt.conn, evt.hdr, evt.payload)
 }
 
 func extractSubProto(h header.IHeader) (uint8, bool) {
@@ -195,18 +239,7 @@ func (p *DispatcherProcess) ConfigSnapshot() (channels, workers, buffer int) {
 }
 
 func (p *DispatcherProcess) selectQueue(conn core.IConnection, hdr header.IHeader) int {
-	if p.chanCount == 1 {
-		return 0
-	}
-	if conn != nil {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(conn.ID()))
-		return int(h.Sum32() % uint32(p.chanCount))
-	}
-	if sub, ok := extractSubProto(hdr); ok {
-		return int(sub) % p.chanCount
-	}
-	return 0
+	return p.strategy.SelectQueue(conn, hdr, p.chanCount)
 }
 
 // OnListen 实现 core.IProcess。
@@ -226,8 +259,14 @@ func (p *DispatcherProcess) OnReceive(ctx context.Context, conn core.IConnection
 	evt := dispatchEvent{ctx: ctx, conn: conn, hdr: hdr, payload: payload}
 	select {
 	case p.queues[idx] <- evt:
+		// 成功入队
 	case <-ctx.Done():
+		// 上下文取消
 	case <-p.runtimeCtx.Done():
+		// runtime 已关闭
+	default:
+		// 队列已满（非阻塞保护）
+		p.log.Warn("process queue full, drop frame", "queue", idx, "conn", conn.ID())
 	}
 }
 

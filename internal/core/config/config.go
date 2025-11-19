@@ -16,6 +16,7 @@ const (
 	KeySendWorkersPerChan   = "send.workers_per_channel"
 	KeySendChannelBuffer    = "send.channel_buffer"
 	KeyRoutingForwardRemote = "routing.forward_remote"
+	KeyProcQueueStrategy    = "process.queue_strategy" // conn|subproto|source_target|roundrobin
 )
 
 // NewMap 使用传入 map 构建 MapConfig；若 data 为空则初始化为空 map。
@@ -31,6 +32,7 @@ func NewMap(data map[string]string) *MapConfig {
 	ensureDefault(mc.data, KeySendWorkersPerChan, "1")
 	ensureDefault(mc.data, KeySendChannelBuffer, "64")
 	ensureDefault(mc.data, KeyRoutingForwardRemote, "true")
+	ensureDefault(mc.data, KeyProcQueueStrategy, "conn")
 	return mc
 }
 
