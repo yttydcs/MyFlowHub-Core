@@ -28,10 +28,15 @@ func NewLoginHandler(log *slog.Logger) *LoginHandler {
 func (h *LoginHandler) SubProto() uint8 { return 2 }
 
 func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
-	_ = ctx
-	_ = payload
 	id := globalNodeID.Add(1) - 1
 	conn.SetMeta("nodeID", id)
+	if srv := extractServer(ctx); srv != nil {
+		if cm, ok := srv.ConnManager().(interface {
+			UpdateNodeIndex(uint32, core.IConnection)
+		}); ok {
+			cm.UpdateNodeIndex(id, conn)
+		}
+	}
 	respObj := map[string]uint32{"id": id}
 	data, _ := json.Marshal(respObj)
 	req := CloneRequest(hdr)

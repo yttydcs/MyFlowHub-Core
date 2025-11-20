@@ -9,13 +9,17 @@ import (
 
 // Manager 是内存连接管理器实现。
 type Manager struct {
-	mu    sync.RWMutex
-	conns map[string]core.IConnection
-	hooks core.ConnectionHooks
+	mu        sync.RWMutex
+	conns     map[string]core.IConnection
+	hooks     core.ConnectionHooks
+	nodeIndex map[uint32]core.IConnection
 }
 
 func New() *Manager {
-	return &Manager{conns: make(map[string]core.IConnection)}
+	return &Manager{
+		conns:     make(map[string]core.IConnection),
+		nodeIndex: make(map[uint32]core.IConnection),
+	}
 }
 
 // SetHooks 注册连接钩子。
@@ -35,12 +39,24 @@ func (m *Manager) Add(conn core.IConnection) error {
 		return errors.New("conn exists")
 	}
 	m.conns[conn.ID()] = conn
+	m.addNodeIndexLocked(conn)
 	h := m.hooks
 	m.mu.Unlock()
 	if h.OnAdd != nil {
 		h.OnAdd(conn)
 	}
 	return nil
+}
+
+func (m *Manager) addNodeIndexLocked(conn core.IConnection) {
+	if conn == nil {
+		return
+	}
+	if nodeID, ok := conn.GetMeta("nodeID"); ok {
+		if nid, ok2 := nodeID.(uint32); ok2 && nid != 0 {
+			m.nodeIndex[nid] = conn
+		}
+	}
 }
 
 func (m *Manager) Remove(id string) error {
@@ -50,6 +66,7 @@ func (m *Manager) Remove(id string) error {
 		m.mu.Unlock()
 		return errors.New("conn not found")
 	}
+	m.removeNodeIndexLocked(conn)
 	delete(m.conns, id)
 	h := m.hooks
 	m.mu.Unlock()
@@ -59,11 +76,48 @@ func (m *Manager) Remove(id string) error {
 	return conn.Close()
 }
 
+func (m *Manager) removeNodeIndexLocked(conn core.IConnection) {
+	if conn == nil {
+		return
+	}
+	if nodeID, ok := conn.GetMeta("nodeID"); ok {
+		if nid, ok2 := nodeID.(uint32); ok2 && nid != 0 {
+			if existing, ok3 := m.nodeIndex[nid]; ok3 && existing == conn {
+				delete(m.nodeIndex, nid)
+			}
+		}
+	}
+}
+
 func (m *Manager) Get(id string) (core.IConnection, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	conn, ok := m.conns[id]
 	return conn, ok
+}
+
+func (m *Manager) GetByNode(id uint32) (core.IConnection, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c, ok := m.nodeIndex[id]
+	return c, ok
+}
+
+func (m *Manager) UpdateNodeIndex(nodeID uint32, conn core.IConnection) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if nodeID == 0 {
+		return
+	}
+	if conn == nil {
+		if existing, ok := m.nodeIndex[nodeID]; ok {
+			if existing != nil {
+				delete(m.nodeIndex, nodeID)
+			}
+		}
+		return
+	}
+	m.nodeIndex[nodeID] = conn
 }
 
 func (m *Manager) Range(fn func(core.IConnection) bool) {

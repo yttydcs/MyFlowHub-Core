@@ -89,6 +89,13 @@ func (p *PreRoutingProcess) OnReceive(ctx context.Context, conn core.IConnection
 			return
 		}
 		p.log.Info("转发消息", "from", hdr.SourceID(), "to", target, "subproto", hdr.SubProto())
+		if targetConn, ok := srv.ConnManager().GetByNode(target); ok {
+			p.forwardOrDrop(func() error {
+				return targetConn.SendWithHeader(hdr, payload, srv.HeaderCodec())
+			})
+			return
+		}
+		// fallback scan
 		var forwarded bool
 		srv.ConnManager().Range(func(c core.IConnection) bool {
 			if meta, ok := c.GetMeta("nodeID"); ok {

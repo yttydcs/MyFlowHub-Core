@@ -146,6 +146,10 @@ type IConnectionManager interface {
 	CloseAll() error
 	// SetHooks 设置连接增删时的回调（可选）。
 	SetHooks(ConnectionHooks)
+	// GetByNode 按节点 ID 获取连接（若支持）。
+	GetByNode(nodeID uint32) (IConnection, bool)
+	// UpdateNodeIndex 更新节点索引映射（用于登录/登出）。
+	UpdateNodeIndex(nodeID uint32, conn IConnection)
 }
 
 // ConnectionHooks 连接事件钩子。
