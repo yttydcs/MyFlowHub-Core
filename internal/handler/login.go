@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -10,184 +12,341 @@ import (
 	"sync/atomic"
 
 	core "MyFlowHub-Core/internal/core"
+	coreconfig "MyFlowHub-Core/internal/core/config"
 	"MyFlowHub-Core/internal/core/header"
 )
 
 const (
-	actionRegister       = "register"
-	actionLogin          = "login"
-	actionAssistRegister = "assist_register"
-	actionAssistLogin    = "assist_login"
-	actionUpload         = "upload_msg"
+	actionRegister            = "register"
+	actionAssistRegister      = "assist_register"
+	actionRegisterResp        = "register_resp"
+	actionAssistRegisterResp  = "assist_register_resp"
+	actionLogin               = "login"
+	actionAssistLogin         = "assist_login"
+	actionLoginResp           = "login_resp"
+	actionAssistLoginResp     = "assist_login_resp"
+	actionRevoke              = "revoke"
+	actionRevokeResp          = "revoke_resp"
+	actionAssistQueryCred     = "assist_query_credential"
+	actionAssistQueryCredResp = "assist_query_credential_resp"
+	actionOffline             = "offline"
+	actionAssistOffline       = "assist_offline"
 )
 
-type loginRequest struct {
-	Action   string `json:"action"`
+type message struct {
+	Action string          `json:"action"`
+	Data   json.RawMessage `json:"data"`
+}
+
+type registerData struct {
+	DeviceID string `json:"device_id"`
+}
+
+type loginData struct {
+	DeviceID   string `json:"device_id"`
+	Credential string `json:"credential"`
+}
+
+type revokeData struct {
+	DeviceID   string `json:"device_id"`
+	NodeID     uint32 `json:"node_id,omitempty"`
+	Credential string `json:"credential,omitempty"`
+}
+
+type queryCredData struct {
 	DeviceID string `json:"device_id"`
 	NodeID   uint32 `json:"node_id,omitempty"`
 }
 
-type loginResponse struct {
-	Code     int    `json:"code"`
-	Msg      string `json:"msg"`
+type offlineData struct {
+	DeviceID string `json:"device_id"`
 	NodeID   uint32 `json:"node_id,omitempty"`
-	DeviceID string `json:"device_id,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
-// LoginHandler (SubProto=2) 负责注册/登录与协助上送。
-// - deviceID 与 nodeID 绑定，不重复分配。
-// - 未注册的 login 返回失败。
-// - 响应 TargetID=0，由最近 Hub 按 deviceID/连接索引送回。
+type respData struct {
+	Code       int    `json:"code"`
+	Msg        string `json:"msg,omitempty"`
+	DeviceID   string `json:"device_id,omitempty"`
+	NodeID     uint32 `json:"node_id,omitempty"`
+	Credential string `json:"credential,omitempty"`
+}
+
+type bindingRecord struct {
+	NodeID     uint32
+	Credential string
+}
+
+// LoginHandler implements register/login/revoke/offline flows with action+data payload.
 type LoginHandler struct {
-	log     *slog.Logger
-	nextID  atomic.Uint32
-	binding struct {
-		mu    sync.RWMutex
-		table map[string]uint32
-	}
+	log *slog.Logger
+
+	nextID atomic.Uint32
+
+	mu          sync.RWMutex
+	whitelist   map[string]bindingRecord // deviceID -> record
+	pendingConn map[string]string        // deviceID -> connID (in-flight assist)
+
+	authNode uint32
 }
 
 func NewLoginHandler(log *slog.Logger) *LoginHandler {
 	if log == nil {
 		log = slog.Default()
 	}
-	h := &LoginHandler{log: log}
-	h.nextID.Store(2) // 1 留给默认 hub
-	h.binding.table = make(map[string]uint32)
+	h := &LoginHandler{
+		log:         log,
+		whitelist:   make(map[string]bindingRecord),
+		pendingConn: make(map[string]string),
+	}
+	h.nextID.Store(2)
 	return h
 }
 
 func (h *LoginHandler) SubProto() uint8 { return 2 }
 
 func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
-	req, err := h.parseRequest(payload)
-	if err != nil {
-		h.reply(ctx, conn, hdr, loginResponse{Code: 400, Msg: "invalid payload"})
+	var msg message
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		h.log.Warn("invalid login payload", "err", err)
 		return
 	}
-	if req.DeviceID == "" {
-		h.reply(ctx, conn, hdr, loginResponse{Code: 400, Msg: "device_id required"})
-		return
-	}
-	switch strings.ToLower(req.Action) {
+	act := strings.ToLower(strings.TrimSpace(msg.Action))
+	switch act {
 	case actionRegister:
-		h.handleRegister(ctx, conn, hdr, req.DeviceID)
-	case actionLogin:
-		h.handleLogin(ctx, conn, hdr, req.DeviceID)
+		h.handleRegister(ctx, conn, hdr, msg.Data, false)
 	case actionAssistRegister:
-		h.handleRegister(ctx, conn, hdr, req.DeviceID)
+		h.handleRegister(ctx, conn, hdr, msg.Data, true)
+	case actionRegisterResp:
+		h.handleRegisterResp(ctx, msg.Data)
+	case actionLogin:
+		h.handleLogin(ctx, conn, hdr, msg.Data, false)
 	case actionAssistLogin:
-		h.handleLogin(ctx, conn, hdr, req.DeviceID)
-	case actionUpload:
-		h.handleUpload(ctx, conn, req.DeviceID, req.NodeID)
+		h.handleLogin(ctx, conn, hdr, msg.Data, true)
+	case actionLoginResp:
+		h.handleLoginResp(ctx, msg.Data)
+	case actionRevoke:
+		h.handleRevoke(ctx, conn, msg.Data)
+	case actionAssistQueryCred:
+		h.handleAssistQuery(ctx, conn, hdr, msg.Data)
+	case actionAssistQueryCredResp:
+		h.handleAssistQueryResp(ctx, msg.Data)
+	case actionOffline:
+		h.handleOffline(ctx, conn, msg.Data, false)
+	case actionAssistOffline:
+		h.handleOffline(ctx, conn, msg.Data, true)
 	default:
-		h.reply(ctx, conn, hdr, loginResponse{Code: 400, Msg: "unknown action"})
+		h.log.Debug("unknown login action", "action", act)
 	}
 }
 
-func (h *LoginHandler) parseRequest(payload []byte) (loginRequest, error) {
-	var req loginRequest
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return req, err
+// register handling
+func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
+	var req registerData
+	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
+		h.sendResp(ctx, conn, hdr, actionRegisterResp, respData{Code: 400, Msg: "invalid register data"})
+		return
 	}
-	req.Action = strings.TrimSpace(strings.ToLower(req.Action))
-	return req, nil
-}
-
-func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, deviceID string) {
-	nodeID := h.ensureBinding(deviceID)
-	h.attachMeta(ctx, conn, nodeID, deviceID)
-	h.reply(ctx, conn, hdr, loginResponse{
-		Code:     1,
-		Msg:      "ok",
-		NodeID:   nodeID,
-		DeviceID: deviceID,
-	})
-	h.sendUpload(ctx, deviceID, nodeID, conn)
-}
-
-func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, hdr core.IHeader, deviceID string) {
-	nodeID, ok := h.lookup(deviceID)
-	if !ok {
-		h.reply(ctx, conn, hdr, loginResponse{
-			Code: 4001,
-			Msg:  "unregistered device",
+	if assisted {
+		// being processed at authority
+		nodeID := h.ensureNodeID(req.DeviceID)
+		cred := h.ensureCredential(req.DeviceID)
+		h.sendResp(ctx, conn, hdr, actionAssistRegisterResp, respData{
+			Code:       1,
+			Msg:        "ok",
+			DeviceID:   req.DeviceID,
+			NodeID:     nodeID,
+			Credential: cred,
 		})
 		return
 	}
-	h.attachMeta(ctx, conn, nodeID, deviceID)
-	h.reply(ctx, conn, hdr, loginResponse{
-		Code:     1,
-		Msg:      "ok",
-		NodeID:   nodeID,
-		DeviceID: deviceID,
-	})
-	h.sendUpload(ctx, deviceID, nodeID, conn)
-}
-
-func (h *LoginHandler) handleUpload(ctx context.Context, conn core.IConnection, deviceID string, nodeID uint32) {
-	if deviceID == "" || nodeID == 0 {
-		h.log.Warn("invalid upload_msg", "device_id", deviceID, "node_id", nodeID)
+	authority := h.selectAuthority(ctx)
+	if authority != nil {
+		h.setPending(req.DeviceID, conn.ID())
+		h.forward(ctx, authority, actionAssistRegister, req)
 		return
 	}
-	// 更新本地绑定与索引（指向下级 hub 连接）
-	h.setBinding(deviceID, nodeID)
-	if srv := core.ServerFromContext(ctx); srv != nil {
-		if cm := srv.ConnManager(); cm != nil {
-			if updater, ok := cm.(interface {
-				UpdateNodeIndex(uint32, core.IConnection)
-				UpdateDeviceIndex(string, core.IConnection)
-			}); ok {
-				updater.UpdateNodeIndex(nodeID, conn)
-				updater.UpdateDeviceIndex(deviceID, conn)
-			}
+	// self authority
+	nodeID := h.ensureNodeID(req.DeviceID)
+	cred := h.ensureCredential(req.DeviceID)
+	h.saveBinding(ctx, conn, req.DeviceID, nodeID, cred)
+	h.sendResp(ctx, conn, hdr, actionRegisterResp, respData{
+		Code:       1,
+		Msg:        "ok",
+		DeviceID:   req.DeviceID,
+		NodeID:     nodeID,
+		Credential: cred,
+	})
+}
+
+func (h *LoginHandler) handleRegisterResp(ctx context.Context, data json.RawMessage) {
+	var resp respData
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return
+	}
+	if resp.DeviceID == "" {
+		return
+	}
+	connID, ok := h.popPending(resp.DeviceID)
+	if !ok {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	if c, found := srv.ConnManager().Get(connID); found {
+		h.saveBinding(ctx, c, resp.DeviceID, resp.NodeID, resp.Credential)
+		h.sendResp(ctx, c, nil, actionRegisterResp, resp)
+	}
+}
+
+// login handling
+func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
+	var req loginData
+	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
+		h.sendResp(ctx, conn, hdr, actionLoginResp, respData{Code: 400, Msg: "invalid login data"})
+		return
+	}
+	if assisted {
+		rec, ok := h.lookup(req.DeviceID)
+		if !ok || rec.Credential != req.Credential {
+			h.sendResp(ctx, conn, hdr, actionAssistLoginResp, respData{Code: 4001, Msg: "invalid credential"})
+			return
 		}
-		h.forwardUpload(ctx, srv, deviceID, nodeID, conn)
+		h.sendResp(ctx, conn, hdr, actionAssistLoginResp, respData{
+			Code:       1,
+			Msg:        "ok",
+			DeviceID:   req.DeviceID,
+			NodeID:     rec.NodeID,
+			Credential: rec.Credential,
+		})
+		return
+	}
+	// local check
+	if rec, ok := h.lookup(req.DeviceID); ok {
+		if rec.Credential == req.Credential {
+			h.saveBinding(ctx, conn, req.DeviceID, rec.NodeID, rec.Credential)
+			h.sendResp(ctx, conn, hdr, actionLoginResp, respData{Code: 1, Msg: "ok", DeviceID: req.DeviceID, NodeID: rec.NodeID, Credential: rec.Credential})
+			return
+		}
+		h.sendResp(ctx, conn, hdr, actionLoginResp, respData{Code: 4001, Msg: "invalid credential"})
+		return
+	}
+	// not found locally, try authority
+	authority := h.selectAuthority(ctx)
+	if authority != nil {
+		h.setPending(req.DeviceID, conn.ID())
+		h.forward(ctx, authority, actionAssistLogin, req)
+		return
+	}
+	h.sendResp(ctx, conn, hdr, actionLoginResp, respData{Code: 4001, Msg: "invalid credential"})
+}
+
+func (h *LoginHandler) handleLoginResp(ctx context.Context, data json.RawMessage) {
+	var resp respData
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return
+	}
+	if resp.DeviceID == "" {
+		return
+	}
+	connID, ok := h.popPending(resp.DeviceID)
+	if !ok {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	if c, found := srv.ConnManager().Get(connID); found {
+		if resp.Code == 1 {
+			h.saveBinding(ctx, c, resp.DeviceID, resp.NodeID, resp.Credential)
+		}
+		h.sendResp(ctx, c, nil, actionLoginResp, resp)
 	}
 }
 
-func (h *LoginHandler) ensureBinding(deviceID string) uint32 {
-	if deviceID == "" {
-		return 0
+// revoke handling: broadcast; respond only if deleted or credential mismatch
+func (h *LoginHandler) handleRevoke(ctx context.Context, conn core.IConnection, data json.RawMessage) {
+	var req revokeData
+	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
+		return
 	}
-	h.binding.mu.RLock()
-	if id, ok := h.binding.table[deviceID]; ok {
-		h.binding.mu.RUnlock()
-		return id
+	removed, mismatch := h.removeBinding(req.DeviceID, req.Credential)
+	if removed || mismatch {
+		// respond only when changed/mismatch
+		if mismatch {
+			h.sendResp(ctx, conn, nil, actionRevokeResp, respData{Code: 4402, Msg: "credential mismatch", DeviceID: req.DeviceID, NodeID: req.NodeID})
+		} else {
+			h.sendResp(ctx, conn, nil, actionRevokeResp, respData{Code: 1, Msg: "ok", DeviceID: req.DeviceID, NodeID: req.NodeID})
+		}
 	}
-	h.binding.mu.RUnlock()
-
-	h.binding.mu.Lock()
-	defer h.binding.mu.Unlock()
-	if id, ok := h.binding.table[deviceID]; ok {
-		return id
-	}
-	next := h.nextID.Add(1) - 1
-	h.binding.table[deviceID] = next
-	return next
+	// broadcast downstream and upstream except source
+	h.broadcast(ctx, conn, actionRevoke, req)
 }
 
-func (h *LoginHandler) setBinding(deviceID string, nodeID uint32) uint32 {
-	if deviceID == "" || nodeID == 0 {
-		return 0
+// assist query credential
+func (h *LoginHandler) handleAssistQuery(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+	var req queryCredData
+	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
+		h.sendResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 400, Msg: "invalid query"})
+		return
 	}
-	h.binding.mu.Lock()
-	defer h.binding.mu.Unlock()
-	if existing, ok := h.binding.table[deviceID]; ok && existing != 0 {
-		return existing
+	if rec, ok := h.lookup(req.DeviceID); ok {
+		h.sendResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 1, Msg: "ok", DeviceID: req.DeviceID, NodeID: rec.NodeID, Credential: rec.Credential})
+		return
 	}
-	h.binding.table[deviceID] = nodeID
-	return nodeID
+	h.sendResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 4001, Msg: "not found"})
 }
 
-func (h *LoginHandler) lookup(deviceID string) (uint32, bool) {
-	h.binding.mu.RLock()
-	id, ok := h.binding.table[deviceID]
-	h.binding.mu.RUnlock()
-	return id, ok
+func (h *LoginHandler) handleAssistQueryResp(ctx context.Context, data json.RawMessage) {
+	var resp respData
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return
+	}
+	if resp.DeviceID == "" {
+		return
+	}
+	connID, ok := h.popPending(resp.DeviceID)
+	if !ok {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	if c, found := srv.ConnManager().Get(connID); found {
+		if resp.Code == 1 {
+			h.saveBinding(ctx, c, resp.DeviceID, resp.NodeID, resp.Credential)
+			h.sendResp(ctx, c, nil, actionLoginResp, respData{Code: 1, Msg: "ok", DeviceID: resp.DeviceID, NodeID: resp.NodeID, Credential: resp.Credential})
+			return
+		}
+		h.sendResp(ctx, c, nil, actionLoginResp, respData{Code: resp.Code, Msg: resp.Msg})
+	}
 }
 
-func (h *LoginHandler) attachMeta(ctx context.Context, conn core.IConnection, nodeID uint32, deviceID string) {
+// offline handling: no response required
+func (h *LoginHandler) handleOffline(ctx context.Context, conn core.IConnection, data json.RawMessage, assisted bool) {
+	var req offlineData
+	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
+		return
+	}
+	h.removeBinding(req.DeviceID, "")
+	h.removeIndexes(ctx, req.NodeID, conn)
+	if !assisted {
+		// forward to parent
+		if parent := h.selectAuthorityConn(ctx); parent != nil && (conn == nil || parent.ID() != conn.ID()) {
+			h.forward(ctx, parent, actionAssistOffline, req)
+		}
+	}
+}
+
+// helpers
+func (h *LoginHandler) saveBinding(ctx context.Context, conn core.IConnection, deviceID string, nodeID uint32, cred string) {
+	h.mu.Lock()
+	h.whitelist[deviceID] = bindingRecord{NodeID: nodeID, Credential: cred}
+	h.mu.Unlock()
 	conn.SetMeta("nodeID", nodeID)
 	conn.SetMeta("deviceID", deviceID)
 	if srv := core.ServerFromContext(ctx); srv != nil {
@@ -203,109 +362,178 @@ func (h *LoginHandler) attachMeta(ctx context.Context, conn core.IConnection, no
 	}
 }
 
-func (h *LoginHandler) reply(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, resp loginResponse) {
-	data, _ := json.Marshal(resp)
-	success := resp.Code == 1
-	hdr := h.buildResponseHeader(reqHdr, success, conn, ctx)
+func (h *LoginHandler) removeBinding(deviceID, cred string) (removed bool, mismatch bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rec, ok := h.whitelist[deviceID]
+	if !ok {
+		return false, false
+	}
+	if cred != "" && rec.Credential != cred {
+		return false, true
+	}
+	delete(h.whitelist, deviceID)
+	return true, false
+}
+
+func (h *LoginHandler) removeIndexes(ctx context.Context, nodeID uint32, conn core.IConnection) {
 	if srv := core.ServerFromContext(ctx); srv != nil {
-		if err := srv.Send(ctx, conn.ID(), hdr, data); err != nil {
-			h.log.Error("send login response failed", "err", err)
+		if cm := srv.ConnManager(); cm != nil {
+			if updater, ok := cm.(interface {
+				UpdateNodeIndex(uint32, core.IConnection)
+				UpdateDeviceIndex(string, core.IConnection)
+			}); ok {
+				if nodeID != 0 {
+					updater.UpdateNodeIndex(nodeID, nil)
+				}
+			}
 		}
+	}
+}
+
+func (h *LoginHandler) lookup(deviceID string) (bindingRecord, bool) {
+	h.mu.RLock()
+	rec, ok := h.whitelist[deviceID]
+	h.mu.RUnlock()
+	return rec, ok
+}
+
+func (h *LoginHandler) ensureNodeID(deviceID string) uint32 {
+	h.mu.RLock()
+	if rec, ok := h.whitelist[deviceID]; ok {
+		h.mu.RUnlock()
+		return rec.NodeID
+	}
+	h.mu.RUnlock()
+	next := h.nextID.Add(1) - 1
+	return next
+}
+
+func (h *LoginHandler) ensureCredential(deviceID string) string {
+	h.mu.RLock()
+	if rec, ok := h.whitelist[deviceID]; ok && rec.Credential != "" {
+		h.mu.RUnlock()
+		return rec.Credential
+	}
+	h.mu.RUnlock()
+	token := generateCredential()
+	return token
+}
+
+func generateCredential() string {
+	buf := make([]byte, 32)
+	_, _ = rand.Read(buf)
+	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+func (h *LoginHandler) setPending(deviceID, connID string) {
+	h.mu.Lock()
+	h.pendingConn[deviceID] = connID
+	h.mu.Unlock()
+}
+
+func (h *LoginHandler) popPending(deviceID string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id, ok := h.pendingConn[deviceID]
+	if ok {
+		delete(h.pendingConn, deviceID)
+	}
+	return id, ok
+}
+
+func (h *LoginHandler) sendResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
+	msg := message{Action: action}
+	raw, _ := json.Marshal(data)
+	msg.Data = raw
+	payload, _ := json.Marshal(msg)
+	hdr := h.buildHeader(ctx, reqHdr)
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		if conn != nil {
+			if err := srv.Send(ctx, conn.ID(), hdr, payload); err != nil {
+				h.log.Warn("send resp failed", "err", err)
+			}
+			return
+		}
+	}
+	if conn != nil {
+		codec := header.HeaderTcpCodec{}
+		_ = conn.SendWithHeader(hdr, payload, codec)
+	}
+}
+
+func (h *LoginHandler) buildHeader(ctx context.Context, reqHdr core.IHeader) core.IHeader {
+	var base core.IHeader = &header.HeaderTcp{}
+	if reqHdr != nil {
+		base = reqHdr.Clone()
+	}
+	src := uint32(0)
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		src = srv.NodeID()
+	}
+	return base.WithMajor(header.MajorOKResp).WithSubProto(2).WithSourceID(src).WithTargetID(0)
+}
+
+func (h *LoginHandler) forward(ctx context.Context, targetConn core.IConnection, action string, data any) {
+	if targetConn == nil {
+		return
+	}
+	payloadData, _ := json.Marshal(data)
+	msg := message{Action: action, Data: payloadData}
+	payload, _ := json.Marshal(msg)
+	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(2)
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		hdr.WithSourceID(srv.NodeID())
+	}
+	if nid, ok := targetConn.GetMeta("nodeID"); ok {
+		if v, ok2 := nid.(uint32); ok2 {
+			hdr.WithTargetID(v)
+		}
+	}
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		_ = srv.Send(ctx, targetConn.ID(), hdr, payload)
 		return
 	}
 	codec := header.HeaderTcpCodec{}
-	if err := conn.SendWithHeader(hdr, data, codec); err != nil {
-		h.log.Error("send login response failed (direct)", "err", err)
-	}
+	_ = targetConn.SendWithHeader(hdr, payload, codec)
 }
 
-func (h *LoginHandler) buildResponseHeader(reqHdr core.IHeader, ok bool, conn core.IConnection, ctx context.Context) core.IHeader {
-	var base core.IHeader
-	if reqHdr != nil {
-		base = reqHdr.Clone()
-	} else {
-		base = &header.HeaderTcp{}
-	}
-	major := header.MajorErrResp
-	if ok {
-		major = header.MajorOKResp
-	}
-	srcID := uint32(0)
-	if srv := core.ServerFromContext(ctx); srv != nil {
-		srcID = srv.NodeID()
-	}
-	return base.
-		WithMajor(major).
-		WithSubProto(2).
-		WithSourceID(srcID).
-		WithTargetID(0)
-}
-
-// Helper for tests to reset state.
-func (h *LoginHandler) reset(start uint32) {
-	h.nextID.Store(start)
-	h.binding.mu.Lock()
-	h.binding.table = make(map[string]uint32)
-	h.binding.mu.Unlock()
-}
-
-func (h *LoginHandler) sendUpload(ctx context.Context, deviceID string, nodeID uint32, srcConn core.IConnection) {
-	if deviceID == "" || nodeID == 0 {
-		return
-	}
+func (h *LoginHandler) selectAuthority(ctx context.Context) core.IConnection {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
-		return
+		return nil
 	}
-	parent, ok := findParentConnLogin(srv.ConnManager())
-	if !ok {
-		return
-	}
-	payload, _ := json.Marshal(loginRequest{
-		Action:   actionUpload,
-		DeviceID: deviceID,
-		NodeID:   nodeID,
-	})
-	target := uint32(0)
-	if meta, ok := parent.GetMeta("nodeID"); ok {
-		if nid, ok2 := meta.(uint32); ok2 {
-			target = nid
+	if h.authNode == 0 && srv.Config() != nil {
+		if raw, ok := srv.Config().Get(coreconfig.KeyParentAddr); ok && raw != "" {
+			// no explicit node id, use parent conn if exists
+		}
+		if raw, ok := srv.Config().Get("authority.node_id"); ok {
+			// optional config
+			if id, err := parseUint32(raw); err == nil && id != 0 {
+				h.authNode = id
+			}
 		}
 	}
-	hdr := (&header.HeaderTcp{}).
-		WithMajor(header.MajorMsg).
-		WithSubProto(2).
-		WithSourceID(srv.NodeID()).
-		WithTargetID(target)
-	if err := srv.Send(ctx, parent.ID(), hdr, payload); err != nil {
-		h.log.Warn("send upload_msg to parent failed", "err", err, "device", deviceID)
+	if h.authNode != 0 {
+		if c, ok := srv.ConnManager().GetByNode(h.authNode); ok {
+			return c
+		}
 	}
+	if parent := h.selectAuthorityConn(ctx); parent != nil {
+		return parent
+	}
+	return nil
 }
 
-func (h *LoginHandler) forwardUpload(ctx context.Context, srv core.IServer, deviceID string, nodeID uint32, fromConn core.IConnection) {
-	parent, ok := findParentConnLogin(srv.ConnManager())
-	if !ok || (fromConn != nil && parent.ID() == fromConn.ID()) {
-		return
+func (h *LoginHandler) selectAuthorityConn(ctx context.Context) core.IConnection {
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return nil
 	}
-	payload, _ := json.Marshal(loginRequest{
-		Action:   actionUpload,
-		DeviceID: deviceID,
-		NodeID:   nodeID,
-	})
-	target := uint32(0)
-	if meta, ok := parent.GetMeta("nodeID"); ok {
-		if nid, ok2 := meta.(uint32); ok2 {
-			target = nid
-		}
+	if c, ok := findParentConnLogin(srv.ConnManager()); ok {
+		return c
 	}
-	hdr := (&header.HeaderTcp{}).
-		WithMajor(header.MajorMsg).
-		WithSubProto(2).
-		WithSourceID(srv.NodeID()).
-		WithTargetID(target)
-	if err := srv.Send(ctx, parent.ID(), hdr, payload); err != nil {
-		h.log.Warn("forward upload_msg failed", "err", err, "device", deviceID)
-	}
+	return nil
 }
 
 func findParentConnLogin(cm core.IConnectionManager) (core.IConnection, bool) {
@@ -325,7 +553,30 @@ func findParentConnLogin(cm core.IConnectionManager) (core.IConnection, bool) {
 	return parent, parent != nil
 }
 
-// Errors for potential future use.
+func (h *LoginHandler) broadcast(ctx context.Context, src core.IConnection, action string, data any) {
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	payloadData, _ := json.Marshal(data)
+	msg := message{Action: action, Data: payloadData}
+	payload, _ := json.Marshal(msg)
+	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(2)
+	if srv != nil {
+		hdr.WithSourceID(srv.NodeID())
+	}
+	srv.ConnManager().Range(func(c core.IConnection) bool {
+		if src != nil && c.ID() == src.ID() {
+			return true
+		}
+		if err := srv.Send(ctx, c.ID(), hdr, payload); err != nil {
+			h.log.Warn("broadcast revoke failed", "conn", c.ID(), "err", err)
+		}
+		return true
+	})
+}
+
+// Errors placeholder
 var (
-	errInvalidAction = errors.New("invalid action")
+	ErrInvalidAction = errors.New("invalid action")
 )
