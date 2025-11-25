@@ -26,7 +26,7 @@ func TestRootHubPing(t *testing.T) {
 	rootCfg := config.NewMap(map[string]string{
 		"addr": rootAddr,
 	})
-	rootHandlers := []core.ISubProcess{handler.NewLoginHandler(nil)}
+	rootHandlers := []core.ISubProcess{handler.NewLoginHandler(nil), handler.NewVarStoreHandler(nil)}
 	rootSrv := startTestServer(t, server.Options{
 		Name:     "Root",
 		Process:  makeProcess(t, rootCfg, rootHandlers),
@@ -59,7 +59,7 @@ func TestRootHubPing(t *testing.T) {
 		config.KeyParentEnable: "true",
 		config.KeyParentAddr:   rootAddr,
 	})
-	hubHandlers := []core.ISubProcess{handler.NewEchoHandler(nil), handler.NewLoginHandler(nil)}
+	hubHandlers := []core.ISubProcess{handler.NewEchoHandler(nil), handler.NewLoginHandler(nil), handler.NewVarStoreHandler(nil)}
 	hubSrv := startTestServer(t, server.Options{
 		Name:     "Hub",
 		Process:  makeProcess(t, hubCfg, hubHandlers),
