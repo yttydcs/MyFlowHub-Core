@@ -66,13 +66,14 @@ func TestLoginHandlerGetPermsAndListRoles(t *testing.T) {
 	}
 	var list struct {
 		Code  int `json:"code"`
+		Total int `json:"total"`
 		Roles []struct {
 			NodeID uint32 `json:"node_id"`
 			Role   string `json:"role"`
 		} `json:"roles"`
 	}
 	_ = json.Unmarshal(msg.Data, &list)
-	if list.Code != 1 || len(list.Roles) == 0 || list.Roles[0].Role != "admin" {
+	if list.Code != 1 || list.Total == 0 || len(list.Roles) == 0 || list.Roles[0].Role != "admin" {
 		t.Fatalf("unexpected list_roles_resp %+v", list)
 	}
 }
@@ -122,6 +123,40 @@ func TestLoginHandlerPermsInvalidate(t *testing.T) {
 	// other node untouched
 	if role, _ := connOther.GetMeta("role"); role == "" {
 		t.Fatalf("unexpected role cleared for other node")
+	}
+}
+
+func TestLoginHandlerPermsInvalidateRefreshToParent(t *testing.T) {
+	cfg := config.NewMap(nil)
+	h := handler.NewLoginHandlerWithConfig(cfg, nil)
+	cm := connmgr.New()
+
+	parent := newAuthConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(99))
+	_ = cm.Add(parent)
+
+	child := newAuthConn("child")
+	child.SetMeta("nodeID", uint32(10))
+	_ = cm.Add(child)
+
+	srv := newAuthServer(1, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	req := mustJSON(map[string]any{"action": "perms_invalidate", "data": map[string]any{"node_ids": []uint32{10}, "refresh": true}})
+	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(2)
+	h.OnReceive(ctx, child, hdr, req)
+
+	if len(parent.sent) == 0 {
+		t.Fatalf("expected refresh get_perms sent to parent")
+	}
+	var msg struct {
+		Action string          `json:"action"`
+		Data   json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(parent.sent[0].payload, &msg)
+	if msg.Action != "get_perms" {
+		t.Fatalf("expected get_perms, got %s", msg.Action)
 	}
 }
 

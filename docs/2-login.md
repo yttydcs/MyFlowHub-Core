@@ -32,8 +32,8 @@ Login/Register 协议（SubProto=2，P2P 统一 action+data）
 - `assist_query_credential`（可选）: `{ "device_id": "...", "node_id": N }`
 - `offline` / `assist_offline`: `{ "device_id": "...", "node_id": N, "reason": "optional" }`
 - `get_perms`（新）: `{ "node_id": N }` 查询指定节点角色/权限
-- `list_roles`（新）: 无 data，查询已知节点角色/权限列表
-- `perms_invalidate`（新）: `{ "node_ids": [N1, N2], "reason": "optional" }` 权限失效通知（node_ids 为空表示全量）
+- `list_roles`（新）: `{ "offset": 0, "limit": 100, "role": "optional", "node_ids": [N1,N2] }`，查询已知节点角色/权限列表（支持分页与过滤）
+- `perms_invalidate`（新）: `{ "node_ids": [N1, N2], "reason": "optional", "refresh": false }` 权限失效通知（node_ids 为空表示全量；`refresh=true` 表示可主动上行刷新）
 
 ### 响应 / data 字段（action = `<req>_resp`）
 - `register_resp` / `assist_register_resp`: `{ "code": 1|err, "msg": "...", "device_id": "...", "node_id": N, "credential": "...", "role": "...", "perms": ["..."] }`
@@ -41,7 +41,7 @@ Login/Register 协议（SubProto=2，P2P 统一 action+data）
 - `revoke_resp`: `{ "code": 1|err, "msg": "...", "device_id": "...", "node_id": N }`
 - `assist_query_credential_resp`: `{ "code": 1|err, "msg": "...", "device_id": "...", "node_id": N, "credential": "..." }`
 - `get_perms_resp`（新）: `{ "code": 1|err, "msg": "...", "node_id": N, "role": "...", "perms": ["..."] }`
-- `list_roles_resp`（新）: `{ "code": 1|err, "msg": "...", "roles": [ { "node_id": N, "role": "...", "perms": ["..."] }, ... ] }`
+- `list_roles_resp`（新）: `{ "code": 1|err, "msg": "...", "total": <int>, "roles": [ { "node_id": N, "role": "...", "perms": ["..."] }, ... ] }`
 - `offline_resp` / `assist_offline_resp`: `{ "code": 1|err, "msg": "...", "device_id": "...", "node_id": N }`
 
 流程
@@ -60,9 +60,9 @@ Login/Register 协议（SubProto=2，P2P 统一 action+data）
 - 权威选择：配置优先；否则默认父；无父则本级。
 
 权限失效通知（perms_invalidate）
-------------------------------
-- 动作：`perms_invalidate`，data: `{ "node_ids": [N1, N2], "reason": "optional" }`；`node_ids` 为空表示全量失效。
-- 处理：各 Hub 清空对应节点的 role/perms 缓存；如需，可向子节点继续广播（target=0，不回父）。
+-------------------------------
+- 动作：`perms_invalidate`，data: `{ "node_ids": [N1, N2], "reason": "optional", "refresh": false }`；`node_ids` 为空表示全量失效。
+- 处理：各 Hub 清空对应节点的 role/perms 缓存；如需，可向子节点继续广播（target=0，不回父）。当 `refresh=true` 时，接收端可对列出的 node_id 主动上行 `get_perms` 进行刷新（空列表时建议仅失效，不触发全量刷新）。
 
 错误码建议（data.code/msg）
 --------------------------

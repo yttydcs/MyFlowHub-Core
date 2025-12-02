@@ -95,12 +95,20 @@ type permsQueryData struct {
 type invalidateData struct {
 	NodeIDs []uint32 `json:"node_ids,omitempty"`
 	Reason  string   `json:"reason,omitempty"`
+	Refresh bool     `json:"refresh,omitempty"`
 }
 
 type rolePermEntry struct {
 	NodeID uint32   `json:"node_id,omitempty"`
 	Role   string   `json:"role,omitempty"`
 	Perms  []string `json:"perms,omitempty"`
+}
+
+type listRolesReq struct {
+	Offset  int      `json:"offset,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
+	Role    string   `json:"role,omitempty"`
+	NodeIDs []uint32 `json:"node_ids,omitempty"`
 }
 
 // LoginHandler implements register/login/revoke/offline flows with action+data payload.
@@ -177,7 +185,7 @@ func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr
 	case actionGetPerms:
 		h.handleGetPerms(ctx, conn, msg.Data)
 	case actionListRoles:
-		h.handleListRoles(ctx, conn)
+		h.handleListRoles(ctx, conn, msg.Data)
 	case actionPermsInvalidate:
 		h.handlePermsInvalidate(ctx, msg.Data)
 	default:
@@ -652,16 +660,21 @@ func (h *LoginHandler) handleGetPerms(ctx context.Context, conn core.IConnection
 	h.sendResp(ctx, conn, nil, actionGetPermsResp, respData{Code: 1, Msg: "ok", NodeID: req.NodeID, Role: role, Perms: perms})
 }
 
-func (h *LoginHandler) handleListRoles(ctx context.Context, conn core.IConnection) {
+func (h *LoginHandler) handleListRoles(ctx context.Context, conn core.IConnection, raw json.RawMessage) {
+	var req listRolesReq
+	_ = json.Unmarshal(raw, &req)
 	snapshot := h.listRolePerms()
+	filtered, total := filterRolePerms(snapshot, req)
 	data := struct {
 		Code  int             `json:"code"`
 		Msg   string          `json:"msg,omitempty"`
+		Total int             `json:"total"`
 		Roles []rolePermEntry `json:"roles,omitempty"`
 	}{
 		Code:  1,
 		Msg:   "ok",
-		Roles: snapshot,
+		Total: total,
+		Roles: filtered,
 	}
 	payload, _ := json.Marshal(data)
 	msg := message{Action: actionListRolesResp, Data: payload}
@@ -680,6 +693,9 @@ func (h *LoginHandler) handlePermsInvalidate(ctx context.Context, raw json.RawMe
 	var req invalidateData
 	_ = json.Unmarshal(raw, &req)
 	h.invalidateCache(req.NodeIDs)
+	if req.Refresh {
+		h.refreshPerms(ctx, req.NodeIDs)
+	}
 	// 清理当前连接的 meta
 	if srv := core.ServerFromContext(ctx); srv != nil {
 		if cm := srv.ConnManager(); cm != nil {
@@ -862,6 +878,70 @@ func (h *LoginHandler) invalidateCache(nodeIDs []uint32) {
 		}
 	}
 	h.mu.Unlock()
+}
+
+func (h *LoginHandler) refreshPerms(ctx context.Context, nodeIDs []uint32) {
+	if len(nodeIDs) == 0 {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	authority := h.selectAuthority(ctx)
+	if authority == nil {
+		return
+	}
+	seen := make(map[uint32]bool)
+	for _, id := range nodeIDs {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		req := permsQueryData{NodeID: id}
+		h.forward(ctx, authority, actionGetPerms, req)
+	}
+}
+
+func filterRolePerms(entries []rolePermEntry, req listRolesReq) ([]rolePermEntry, int) {
+	roleFilter := strings.TrimSpace(req.Role)
+	nodeFilter := make(map[uint32]bool)
+	for _, id := range req.NodeIDs {
+		if id != 0 {
+			nodeFilter[id] = true
+		}
+	}
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	filtered := make([]rolePermEntry, 0, len(entries))
+	for _, e := range entries {
+		if roleFilter != "" && e.Role != roleFilter {
+			continue
+		}
+		if len(nodeFilter) > 0 && !nodeFilter[e.NodeID] {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	total := len(filtered)
+	if offset >= total {
+		return []rolePermEntry{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return filtered[offset:end], total
 }
 
 func parseList(raw string) []string {

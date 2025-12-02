@@ -84,12 +84,20 @@ type permsQueryData struct {
 type invalidateData struct {
 	NodeIDs []uint32 `json:"node_ids,omitempty"`
 	Reason  string   `json:"reason,omitempty"`
+	Refresh bool     `json:"refresh,omitempty"`
 }
 
 type rolePermEntry struct {
 	NodeID uint32   `json:"node_id,omitempty"`
 	Role   string   `json:"role,omitempty"`
 	Perms  []string `json:"perms,omitempty"`
+}
+
+type listRolesReq struct {
+	Offset  int      `json:"offset,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
+	Role    string   `json:"role,omitempty"`
+	NodeIDs []uint32 `json:"node_ids,omitempty"`
 }
 
 // AuthorityHandler implements SubProto=2 as the authoritative login server backed by persistent storage.
@@ -153,7 +161,7 @@ func (h *AuthorityHandler) OnReceive(ctx context.Context, conn core.IConnection,
 	case actionGetPerms:
 		h.handleGetPerms(ctx, conn, msg.Data)
 	case actionListRoles:
-		h.handleListRoles(ctx, conn)
+		h.handleListRoles(ctx, conn, msg.Data)
 	case actionPermsInvalidate:
 		h.handlePermsInvalidate(msg.Data)
 	default:
@@ -296,16 +304,21 @@ func (h *AuthorityHandler) handleGetPerms(ctx context.Context, conn core.IConnec
 	h.sendResp(ctx, conn, nil, actionGetPermsResp, respData{Code: 1, Msg: "ok", NodeID: req.NodeID, Role: role, Perms: perms})
 }
 
-func (h *AuthorityHandler) handleListRoles(ctx context.Context, conn core.IConnection) {
+func (h *AuthorityHandler) handleListRoles(ctx context.Context, conn core.IConnection, raw json.RawMessage) {
+	var req listRolesReq
+	_ = json.Unmarshal(raw, &req)
 	snapshot := h.listRolePerms()
+	filtered, total := filterRolePerms(snapshot, req)
 	data := struct {
 		Code  int             `json:"code"`
 		Msg   string          `json:"msg,omitempty"`
+		Total int             `json:"total"`
 		Roles []rolePermEntry `json:"roles,omitempty"`
 	}{
 		Code:  1,
 		Msg:   "ok",
-		Roles: snapshot,
+		Total: total,
+		Roles: filtered,
 	}
 	payload, _ := json.Marshal(data)
 	msg := message{Action: actionListRolesResp, Data: payload}
@@ -324,6 +337,7 @@ func (h *AuthorityHandler) handlePermsInvalidate(raw json.RawMessage) {
 	var req invalidateData
 	_ = json.Unmarshal(raw, &req)
 	h.invalidateCache(req.NodeIDs)
+	// 权威端不需要上行刷新；若需要下行广播可在调用侧发送
 }
 
 func (h *AuthorityHandler) sendResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
@@ -507,6 +521,47 @@ func (h *AuthorityHandler) invalidateCache(nodeIDs []uint32) {
 		}
 	}
 	h.cacheMu.Unlock()
+}
+
+func filterRolePerms(entries []rolePermEntry, req listRolesReq) ([]rolePermEntry, int) {
+	roleFilter := strings.TrimSpace(req.Role)
+	nodeFilter := make(map[uint32]bool)
+	for _, id := range req.NodeIDs {
+		if id != 0 {
+			nodeFilter[id] = true
+		}
+	}
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	filtered := make([]rolePermEntry, 0, len(entries))
+	for _, e := range entries {
+		if roleFilter != "" && e.Role != roleFilter {
+			continue
+		}
+		if len(nodeFilter) > 0 && !nodeFilter[e.NodeID] {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	total := len(filtered)
+	if offset >= total {
+		return []rolePermEntry{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return filtered[offset:end], total
 }
 
 func parseList(raw string) []string {
