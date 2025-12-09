@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 )
@@ -87,6 +88,13 @@ type ISubProcess interface {
 	SubProto() uint8
 	// OnReceive 处理指定子协议的数据帧
 	OnReceive(ctx context.Context, conn IConnection, hdr IHeader, payload []byte)
+}
+
+// SubProcessAction 抽象子协议内单个动作。
+type SubProcessAction interface {
+	Name() string
+	RequireAuth() bool
+	Handle(context.Context, IConnection, IHeader, json.RawMessage)
 }
 
 // IHeaderCodec 头编解码接口：不同协议实现各自的头部序列化与反序列化。
