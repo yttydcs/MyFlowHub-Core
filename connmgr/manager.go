@@ -95,11 +95,10 @@ func (m *Manager) removeNodeIndexLocked(conn core.IConnection) {
 	if conn == nil {
 		return
 	}
-	if nodeID, ok := conn.GetMeta("nodeID"); ok {
-		if nid, ok2 := nodeID.(uint32); ok2 && nid != 0 {
-			if existing, ok3 := m.nodeIndex[nid]; ok3 && existing == conn {
-				delete(m.nodeIndex, nid)
-			}
+	// 清理所有指向该连接的节点索引
+	for nid, c := range m.nodeIndex {
+		if c == conn {
+			delete(m.nodeIndex, nid)
 		}
 	}
 }
@@ -145,6 +144,16 @@ func (m *Manager) UpdateNodeIndex(nodeID uint32, conn core.IConnection) {
 		return
 	}
 	m.nodeIndex[nodeID] = conn
+}
+
+// AddNodeIndex 追加 node 映射，允许同一连接挂多个 nodeID。
+func (m *Manager) AddNodeIndex(nodeID uint32, conn core.IConnection) {
+	m.UpdateNodeIndex(nodeID, conn)
+}
+
+// RemoveNodeIndex 删除指定 node 映射。
+func (m *Manager) RemoveNodeIndex(nodeID uint32) {
+	m.UpdateNodeIndex(nodeID, nil)
 }
 
 func (m *Manager) GetByDevice(devID string) (core.IConnection, bool) {
