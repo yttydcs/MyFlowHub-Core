@@ -90,6 +90,10 @@ type ISubProcess interface {
 	OnReceive(ctx context.Context, conn IConnection, hdr IHeader, payload []byte)
 	// Init 执行子协议处理器的初始化，返回是否成功
 	Init() bool
+	// AcceptCmd 声明 Cmd 帧在目标非本地时是否仍需本地处理一次
+	AcceptCmd() bool
+	// AllowSourceMismatch 是否允许 SourceID 与连接元数据的 nodeID 不一致
+	AllowSourceMismatch() bool
 }
 
 // SubProcessAction 抽象子协议内单个动作。

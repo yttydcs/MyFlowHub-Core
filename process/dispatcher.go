@@ -259,7 +259,7 @@ func sourceMismatch(h core.ISubProcess, conn core.IConnection, hdr core.IHeader)
 	if h == nil || conn == nil || hdr == nil {
 		return false
 	}
-	if opt, ok := h.(SourceCheckOpt); ok && opt.AllowSourceMismatch() {
+	if h.AllowSourceMismatch() {
 		return false
 	}
 	metaNode := extractNodeID(conn)
@@ -270,17 +270,6 @@ func sourceMismatch(h core.ISubProcess, conn core.IConnection, hdr core.IHeader)
 	return hdr.SourceID() != metaNode
 }
 
-// CmdInterceptable 可选接口：声明 handler 是否需要在 Cmd 帧目标非本地时仍本地处理一次。
-type CmdInterceptable interface {
-	AcceptCmd() bool
-}
-
-// SourceCheckOpt 可选接口：声明是否允许 SourceID 与连接元数据的 nodeID 不一致。
-// 默认不允许，返回 true 表示跳过校验（例如登录协议需要在未绑定 nodeID 前工作）。
-type SourceCheckOpt interface {
-	AllowSourceMismatch() bool
-}
-
 func shouldInterceptCmd(h core.ISubProcess, hdr core.IHeader) bool {
 	if h == nil || hdr == nil {
 		return false
@@ -288,10 +277,7 @@ func shouldInterceptCmd(h core.ISubProcess, hdr core.IHeader) bool {
 	if hdr.Major() != header.MajorCmd {
 		return false
 	}
-	if ci, ok := h.(CmdInterceptable); ok {
-		return ci.AcceptCmd()
-	}
-	return false
+	return h.AcceptCmd()
 }
 
 // Shutdown 关闭 worker 池。
