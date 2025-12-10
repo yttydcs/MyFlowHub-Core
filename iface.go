@@ -88,6 +88,8 @@ type ISubProcess interface {
 	SubProto() uint8
 	// OnReceive 处理指定子协议的数据帧
 	OnReceive(ctx context.Context, conn IConnection, hdr IHeader, payload []byte)
+	// Init 执行子协议处理器的初始化，返回是否成功
+	Init() bool
 }
 
 // SubProcessAction 抽象子协议内单个动作。

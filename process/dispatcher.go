@@ -111,6 +111,9 @@ func (p *DispatcherProcess) RegisterHandler(h core.ISubProcess) error {
 	if sub > 63 {
 		return fmt.Errorf("sub proto %d out of range", sub)
 	}
+	if !h.Init() {
+		return fmt.Errorf("sub proto %d init failed", sub)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, exists := p.handlers[sub]; exists {
