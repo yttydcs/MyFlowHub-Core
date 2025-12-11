@@ -34,6 +34,9 @@ const (
 	KeyParentEnable         = "parent.enable"
 	KeyParentAddr           = "parent.addr"
 	KeyParentReconnectSec   = "parent.reconnect_sec"
+	KeyAuthNodePrivKey      = "auth.node_privkey" // base64 DER p256 private key
+	KeyAuthNodePubKey       = "auth.node_pubkey"  // base64 DER p256 public key
+	KeyAuthTrustedNodes     = "auth.trusted_nodes"
 )
 
 // NewMap builds a MapConfig from the provided data and fills defaults for missing keys.
@@ -69,6 +72,17 @@ func ensureDefault(m map[string]string, key, val string) {
 	if _, ok := m[key]; !ok {
 		m[key] = val
 	}
+}
+
+func (m *MapConfig) MergeFile(data map[string]string) {
+	if m == nil || data == nil {
+		return
+	}
+	m.mu.Lock()
+	for k, v := range data {
+		m.data[k] = v
+	}
+	m.mu.Unlock()
 }
 
 // Get returns value and existence flag.

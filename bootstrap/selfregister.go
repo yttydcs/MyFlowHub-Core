@@ -22,7 +22,7 @@ type SelfRegisterOptions struct {
 	Logger      *slog.Logger
 }
 
-// SelfRegister 通过 SubProto=2 的 register/login 获取 node_id 与 credential。
+// SelfRegister 通过 SubProto=2 的 register/login 获取 node_id（旧版会返回 credential，现已不要求）。
 // 适用于有父节点且未预设 node_id 的 Hub/节点。
 func SelfRegister(ctx context.Context, opts SelfRegisterOptions) (uint32, string, error) {
 	if opts.ParentAddr == "" {
@@ -82,8 +82,8 @@ func SelfRegister(ctx context.Context, opts SelfRegisterOptions) (uint32, string
 		loginPayload, _ := json.Marshal(map[string]any{
 			"action": "login",
 			"data": map[string]any{
-				"device_id":  opts.SelfID,
-				"credential": cred,
+				"device_id": opts.SelfID,
+				// 新版登录需签名支持，这里仅保留占位，实际流程应在调用处构造签名。
 			},
 		})
 		loginHdr := (&header.HeaderTcp{}).
@@ -125,18 +125,17 @@ func parseRegisterResp(_ core.IHeader, body []byte) (uint32, string, error) {
 		return 0, "", err
 	}
 	var resp struct {
-		Code       int    `json:"code"`
-		NodeID     uint32 `json:"node_id"`
-		Credential string `json:"credential"`
-		Msg        string `json:"msg"`
+		Code   int    `json:"code"`
+		NodeID uint32 `json:"node_id"`
+		Msg    string `json:"msg"`
 	}
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
 		return 0, "", err
 	}
-	if resp.Code != 1 || resp.NodeID == 0 || resp.Credential == "" {
+	if resp.Code != 1 || resp.NodeID == 0 {
 		return 0, "", errors.New("register failed: " + resp.Msg)
 	}
-	return resp.NodeID, resp.Credential, nil
+	return resp.NodeID, "", nil
 }
 
 func assertLoginOK(body []byte) error {
